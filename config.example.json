@@ -1,0 +1,4 @@
+{
+  "ollamaHost": "http://localhost:11434",
+  "model": "deepseek-v4.1-flash:cloud"
+}

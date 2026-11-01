@@ -1,0 +1,14 @@
+# dependencies and build output (recreated by `npm run setup` / `npm start`)
+node_modules/
+.venv/
+build/
+src/renderer/dist/
+
+# your own settings (copied from config.example.json by setup)
+config.json
+
+# local / editor
+.DS_Store
+.claude/
+ref/
+*.log

@@ -1,0 +1,3 @@
+# tltk (Wayu's Thai G2P) pins scikit-learn 1.2.2, which is built against numpy 1 and breaks
+# next to NeMo's numpy 2. The current release works fine for tltk too.
+scikit-learn==1.9.1

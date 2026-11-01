@@ -1,0 +1,7 @@
+# Top-level Python packages for Blu's speech. `npm run setup` installs the exact pinned
+# set in requirements.lock; regenerate it from this file with:
+#   uv pip compile speech/requirements.txt --override speech/overrides.txt -o speech/requirements.lock --python-version 3.11
+typhoon-asr==0.1.1
+wayu-tts @ git+https://github.com/wayu-research/wayu-tts-inference@07ab898d516649313926f0b843b809a962f993ad
+# English G2P for Thai-English mixed sentences (misaki would otherwise download it at runtime)
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

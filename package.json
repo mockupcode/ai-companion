@@ -1,0 +1,30 @@
+{
+  "name": "ai-companion",
+  "productName": "Blu",
+  "version": "0.1.0",
+  "description": "A 3D desktop robot that walks on your screen, chats through Ollama, and talks and listens in Thai",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mockupcode/ai-companion.git"
+  },
+  "main": "src/main/index.js",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "start": "npm run build && electron .",
+    "build": "npm run build:ui && npm run build:native",
+    "build:ui": "esbuild src/renderer/app.js --bundle --format=iife --target=chrome130 --sourcemap --outfile=src/renderer/dist/app.js",
+    "build:native": "command -v swiftc >/dev/null 2>&1 || exit 0; [ build/keytap -nt src/native/keytap.swift ] || (mkdir -p build && swiftc -O -o build/keytap src/native/keytap.swift)"
+  },
+  "dependencies": {
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "electron": "^45.2.1",
+    "esbuild": "^0.28.2"
+  }
+}
