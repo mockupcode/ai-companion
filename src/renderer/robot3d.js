@@ -432,6 +432,7 @@ const OUTLINE = outlineMaterial();
 function lidMaterial(base) {
   const m = shadeEdges(base.clone(), EDGE.blue);
   m.side = THREE.FrontSide;
+  Object.assign(m, { polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
   m.userData.noOutline = true;
   m.userData.cut = { value: new THREE.Vector4(1, -1, 0, 0) };
   const ink = new THREE.Color(INK);
@@ -841,7 +842,8 @@ export class Robot {
       const rim = (v) => Math.sin((v * Math.PI) / 2); // rows crowd the steep edge of the dome
       reshapePlate(eye.white.geometry, eyeDisc(surface, place, { rx, ry, rows: rim, sink: -0.012 }));
       reshapePlate(eye.ring.geometry, eyeDisc(surface, place, { rx, ry, k0: 1, grow0: -0.006, grow1: 0.032, lift: 0.016 }));
-      reshapePlate(eye.lid.geometry, eyeDisc(surface, place, { rx, ry, grow1: 0.012, rows: rim, lift: 0.01, sink: 0.004 }));
+      // the lid rides clear of the iris layers and the catchlight beads, so it hides them all
+      reshapePlate(eye.lid.geometry, eyeDisc(surface, place, { rx, ry, grow1: 0.012, rows: rim, lift: 0.036, sink: 0.03 }));
       eye.catchlights[0].position.copy(place(surface(0.03 * size, 0.036 * size, 0.008)));
       eye.catchlights[1].position.copy(place(surface(-0.042 * size, -0.046 * size, 0.008)));
     }
