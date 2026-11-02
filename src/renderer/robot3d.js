@@ -4,29 +4,40 @@ import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometr
 import { FaceDecal, ChestScreen, FACE_SLICE } from './face.js';
 import { Spring, TAU, clamp, damp, easeInOut, lerp, noise, rand, smoothstep } from './springs.js';
 
-// A procedural 3D take on ref/robo.jpeg. Scene units: ground at y = 0, the robot faces +z,
-// about 2.4 units from feet to antenna tip. Nothing is keyframed; poses are targets that
-// joints chase through damping and springs, so every transition stays smooth.
+// A procedural 3D take on the Blu character sheet (front, both sides, back), down to its
+// ink outlines. Scene units: ground at y = 0, the robot faces +z, about 2.48 units from
+// feet to antenna tip. Nothing is keyframed; poses are targets that joints chase through
+// damping and springs, so every transition stays smooth.
 
 const DOWN = new THREE.Vector3(0, -1, 0);
 const FWD = new THREE.Vector3(0, 0, 1);
 
-const HIP_Y = 0.5;
-const SHOULDER = { x: 0.37, y: 0.98 };
-const NECK_Y = 1.1;
-export const HEAD_Y = 1.62;
-const HEAD = { rx: 0.58, rz: 0.52, top: 0.47, bot: 0.42, exp: 0.78 };
-const EYE = { r: 0.17, angle: 0.47, lat: -0.03, sink: 0.84 };
-const ANKLE_Y = 0.13;
+const HIP_Y = 0.46;
+const SHOULDER = { x: 0.375, y: 0.91 };
+const NECK_Y = 1.0;
+export const HEAD_Y = 1.565;
+// Half extents, and superellipse exponents per axis as [jaw, dome]: the dome is nearly
+// round, the jaw squarer from the front than from the side.
+const HEAD = { rx: 0.54, rz: 0.48, top: 0.48, bot: 0.475, ex: [0.5, 0.95], ey: [0.56, 0.95], ez: [0.78, 0.95] };
+// The white is an rx by ry ellipse domed out of the face; out: how far it bulges.
+// look: furthest the iris slides off centre.
+const EYE = { rx: 0.185, ry: 0.195, x: 0.245, y: -0.045, out: 0.07, iris: 0.1, pupil: 0.078, look: 0.075 };
+const EAR = { y: -0.1, z: -0.08 };
+const TORSO_Z = 0.8; // torso depth relative to its width
+const ANKLE_Y = 0.17;
 const STEP = 0.2; // ground covered per half walk cycle
 const WALK_YAW = 1.05; // body turn toward the walking direction (a readable 3/4 view)
+const INK = 0x0c1326;
+const LINE = 0.014; // outline width
+// how much colour is left at the silhouette, see shadeEdges()
+const EDGE = { blue: 0.5, metal: 0.66, white: 0.84 };
 
 // ---------------------------------------------------------------- expressions
 
 //  lidTop/lidBot: 0 open .. 1 closed   tilt: + angry brows, - worried   pupil/eye: scale
 //  heart: heart-shaped pupils   smile: -1 frown .. 1 grin   open/round/teeth/wobble: mouth
 export const EXPRESSIONS = {
-  neutral: { lidTop: 0.1, lidBot: 0.05, tilt: 0, pupil: 1, eye: 1, heart: 0, sparkle: 0, asym: 0, smile: 0.45, open: 0, round: 0, teeth: 0, wobble: 0, blush: 0, glow: 0x5ee0ff },
+  neutral: { lidTop: 0.02, lidBot: 0, tilt: 0, pupil: 1, eye: 1, heart: 0, sparkle: 0, asym: 0, smile: 0.6, open: 0, round: 0, teeth: 0, wobble: 0, blush: 0, glow: 0x5ee0ff },
   happy: { lidTop: 0, lidBot: 0.42, tilt: 0, pupil: 1.1, eye: 1, heart: 0, sparkle: 0.4, asym: 0, smile: 1, open: 0.42, round: 0, teeth: 0, wobble: 0, blush: 0.35, glow: 0x6dffa0 },
   excited: { lidTop: 0, lidBot: 0.18, tilt: 0, pupil: 1.25, eye: 1.08, heart: 0, sparkle: 1, asym: 0, smile: 1, open: 0.8, round: 0.1, teeth: 0, wobble: 0, blush: 0.3, glow: 0xffd84a },
   love: { lidTop: 0.05, lidBot: 0.3, tilt: 0, pupil: 1, eye: 1.03, heart: 1, sparkle: 0.5, asym: 0, smile: 0.9, open: 0.2, round: 0, teeth: 0, wobble: 0, blush: 0.9, glow: 0xff6fae },
@@ -59,7 +70,7 @@ const POSTURE_KEYS = Object.keys(POSTURES.neutral).filter((k) => k !== 'arms');
 // Arm FK targets: shoulder swings forward (fwd) and out to the side (out); the elbow
 // bends forward (bend) and toward the body (inw). Radians.
 const ARM_POSES = {
-  rest: { fwd: 0.08, out: 0.16, bend: 0.35, inw: 0 },
+  rest: { fwd: 0.06, out: 0.5, bend: 0.3, inw: 0.34 },
   open: { fwd: 0.15, out: 0.4, bend: 0.5, inw: -0.2 },
   limp: { fwd: -0.02, out: 0.05, bend: 0.08, inw: 0 },
   cheer: { fwd: 0.1, out: 2.65, bend: 0.25, inw: 0 },
@@ -144,14 +155,134 @@ const SCREEN_MODES = {
 
 // ---------------------------------------------------------------- geometry
 
+const spow = (c, e) => Math.sign(c) * Math.abs(c) ** e;
+const headExp = ([jaw, dome], dy) => lerp(jaw, dome, smoothstep(-0.6, 0.6, dy));
+
 function headPoint(dir, out, inflate = 1) {
-  // Map a unit direction onto a soft superellipsoid: rounder-squarer than a sphere,
-  // flatter underneath, like the reference head.
-  const f = (c) => Math.sign(c) * Math.abs(c) ** HEAD.exp;
-  const x = f(dir.x) * HEAD.rx;
-  const y = f(dir.y) * (dir.y > 0 ? HEAD.top : HEAD.bot);
-  const z = f(dir.z) * HEAD.rz;
+  // Map a unit direction onto a soft superellipsoid: a round dome over a squarer jaw,
+  // like the reference head.
+  const x = spow(dir.x, headExp(HEAD.ex, dir.y)) * HEAD.rx;
+  const y = spow(dir.y, headExp(HEAD.ey, dir.y)) * (dir.y > 0 ? HEAD.top : HEAD.bot);
+  const z = spow(dir.z, headExp(HEAD.ez, dir.y)) * HEAD.rz;
   return out.set(x, y, z).multiplyScalar(inflate);
+}
+
+// Inverse of headPoint: the point on the face (or the back of the head) at height y,
+// x across. With ({ y, z, side }) instead, the point on that side of the head.
+function headAt({ x, y, z, back = false, side = 1 }, inflate = 1) {
+  const fy = clamp(y / (y > 0 ? HEAD.top : HEAD.bot), -1, 1);
+  let dy = fy;
+  for (let i = 0; i < 6; i++) dy = spow(fy, 1 / headExp(HEAD.ey, dy));
+  const ex = headExp(HEAD.ex, dy);
+  const ez = headExp(HEAD.ez, dy);
+  const rest = (c) => Math.sqrt(Math.max(0, 1 - c * c - dy * dy));
+  const p = new THREE.Vector3(x ?? 0, y, z ?? 0);
+  if (x !== undefined) p.z = spow(rest(spow(clamp(x / HEAD.rx, -1, 1), 1 / ex)), ez) * HEAD.rz * (back ? -1 : 1);
+  else p.x = spow(rest(spow(clamp(z / HEAD.rz, -1, 1), 1 / ez)), ex) * HEAD.rx * side;
+  return p.multiplyScalar(inflate);
+}
+
+// A raised panel. at(u, v, top) maps the unit square onto the body, u to the viewer's
+// right; top picks the panel face, otherwise where its edge sinks into the body.
+function plateGeometry(at, nu, nv, uvOf = (u, v) => [u, v]) {
+  const pos = [];
+  const uv = [];
+  const idx = [];
+  const put = (p, u, v) => {
+    pos.push(p.x, p.y, p.z);
+    uv.push(...uvOf(u, v));
+    return pos.length / 3 - 1;
+  };
+  for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) put(at(i / nu, j / nv, true), i / nu, j / nv);
+  for (let j = 0; j < nv; j++) {
+    for (let i = 0; i < nu; i++) {
+      const a = j * (nu + 1) + i;
+      idx.push(a, a + 1, a + nu + 2, a, a + nu + 2, a + nu + 1);
+    }
+  }
+  const base = plateEdge(nu, nv).map(([u, v]) => [put(at(u, v, true), u, v), put(at(u, v, false), u, v)]);
+  base.forEach(([a, b], k) => {
+    const [c, d] = base[(k + 1) % base.length];
+    idx.push(a, b, d, a, d, c);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  g.userData = { nu, nv };
+  return g;
+}
+
+// the skirt runs counter-clockwise round the edge so it faces outward
+function plateEdge(nu, nv) {
+  const ring = [];
+  for (let i = 0; i < nu; i++) ring.push([i / nu, 0]);
+  for (let j = 0; j < nv; j++) ring.push([1, j / nv]);
+  for (let i = nu; i > 0; i--) ring.push([i / nu, 1]);
+  for (let j = nv; j > 0; j--) ring.push([0, j / nv]);
+  return ring;
+}
+
+// Moves a plate's vertices onto a new at(), keeping its layout.
+function reshapePlate(geo, at) {
+  const { nu, nv } = geo.userData;
+  const p = geo.attributes.position;
+  let n = 0;
+  const put = (v) => p.setXYZ(n++, v.x, v.y, v.z);
+  for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) put(at(i / nu, j / nv, true));
+  for (const [u, v] of plateEdge(nu, nv)) {
+    put(at(u, v, true));
+    put(at(u, v, false));
+  }
+  p.needsUpdate = true;
+  geo.computeVertexNormals();
+  geo.boundingSphere = null;
+}
+
+// The eye in head space: the face, domed up inside an ellipse rx by ry round (cx, cy).
+// Points are given as offsets from that centre.
+function eyeSurface(cx, cy, rx, ry) {
+  return (dx, dy, lift = 0) => {
+    const p = headAt({ x: cx + dx, y: cy + dy });
+    const q = Math.min(1, Math.hypot(dx / rx, dy / ry));
+    return p.addScaledVector(p.clone().normalize(), EYE.out * (1 - q * q) ** 0.65 + lift);
+  };
+}
+
+// A disc (or a ring when k0 > 0) of plate on an eye surface: k scales the ellipse,
+// grow is added to it outright, so a ring can keep a constant width.
+const eyeDisc = (surface, place, { rx, ry, k0 = 0, k1 = 1, grow0 = 0, grow1 = 0, lift = 0, sink = -0.006, ox = 0, oy = 0, rows = (v) => v }) =>
+  (u, v, top) => {
+    const a = -u * TAU;
+    const k = lerp(k0, k1, rows(v));
+    const g = lerp(grow0, grow1, v);
+    return place(surface(ox + (rx * k + g) * Math.cos(a), oy + (ry * k + g) * Math.sin(a), top ? lift : sink));
+  };
+
+// Half-width at t (0 bottom .. 1 top) of a rounded rectangle w wide, h tall, corner radius c.
+const roundedRect = (w, h, c) => (t) => {
+  const d = Math.max(0, Math.abs(t - 0.5) * h - (h / 2 - c));
+  return w / 2 - c + Math.sqrt(Math.max(0, c * c - d * d));
+};
+// Half-width following straight lines through [t, w] stops.
+const polyline = (...stops) => (t) => {
+  let i = 1;
+  while (i < stops.length - 1 && stops[i][0] < t) i++;
+  const [t0, w0] = stops[i - 1];
+  const [t1, w1] = stops[i];
+  return lerp(w0, w1, clamp((t - t0) / (t1 - t0), 0, 1)) / 2;
+};
+// rows bunch up at the ends, where rounded corners need them
+const easeRows = (v) => 0.5 - 0.5 * Math.cos(Math.PI * v);
+
+// A panel on the head, y0..y1 high, hw(t) half as wide, on the face or the back.
+function headPlate({ y0, y1, width, lift, back = false, nu = 12, nv = 10 }) {
+  return plateGeometry((u, v, top) => {
+    const t = easeRows(v);
+    const p = headAt({ x: (2 * u - 1) * width(t) * (back ? -1 : 1), y: lerp(y0, y1, t), back });
+    return p.addScaledVector(p.clone().normalize(), top ? lift : -0.006);
+  }, nu, nv);
 }
 
 function deformToHead(geo, inflate) {
@@ -165,8 +296,8 @@ function deformToHead(geo, inflate) {
   return geo;
 }
 
-function headGeometry() {
-  let g = deformToHead(new THREE.SphereGeometry(1, 72, 48), 1);
+function headGeometry(sphere = new THREE.SphereGeometry(1, 72, 48), inflate = 1) {
+  let g = deformToHead(sphere, inflate);
   g.deleteAttribute('normal');
   g.deleteAttribute('uv');
   g = mergeVertices(g); // weld the UV seam so normals are smooth all round
@@ -176,18 +307,40 @@ function headGeometry() {
 
 function faceGeometry() {
   const s = FACE_SLICE;
-  const g = deformToHead(new THREE.SphereGeometry(1, 56, 36, s.phiStart, s.phiLength, s.thetaStart, s.thetaLength), 1.004);
+  const g = deformToHead(new THREE.SphereGeometry(1, 56, 36, s.phiStart, s.phiLength, s.thetaStart, s.thetaLength), 1.007);
   g.computeVertexNormals();
   return g;
 }
 
 const TORSO_PROFILE = [
-  [0.01, 0.44], [0.2, 0.448], [0.272, 0.52], [0.318, 0.63], [0.34, 0.76],
-  [0.336, 0.88], [0.31, 0.99], [0.25, 1.07], [0.14, 1.115], [0.01, 1.125],
+  [0.01, 0.395], [0.14, 0.4], [0.22, 0.43], [0.27, 0.49], [0.31, 0.58], [0.34, 0.69], [0.355, 0.8],
+  [0.354, 0.89], [0.335, 0.955], [0.29, 1.003], [0.2, 1.035], [0.01, 1.05],
 ];
+const TORSO_POINTS = new THREE.SplineCurve(TORSO_PROFILE.map(([r, y]) => new THREE.Vector2(r, y))).getPoints(48);
 
-function torsoPoints() {
-  return new THREE.SplineCurve(TORSO_PROFILE.map(([r, y]) => new THREE.Vector2(r, y))).getPoints(60);
+function torsoR(y) {
+  const p = TORSO_POINTS;
+  let i = 1;
+  while (i < p.length - 1 && p[i].y < y) i++;
+  return lerp(p[i - 1].x, p[i].x, clamp((y - p[i - 1].y) / (p[i].y - p[i - 1].y || 1), 0, 1));
+}
+
+// Point on the torso at angle a round it (0 = front) and height y, lifted off the surface.
+function torsoAt(a, y, lift) {
+  const r = torsoR(y);
+  const slope = (torsoR(y + 0.005) - torsoR(y - 0.005)) / 0.01;
+  const n = new THREE.Vector3(Math.sin(a), -slope, Math.cos(a) / TORSO_Z).normalize();
+  return new THREE.Vector3(r * Math.sin(a), y, r * Math.cos(a) * TORSO_Z).addScaledVector(n, lift);
+}
+
+// A panel on the torso centred at angle a0, y0..y1 high, width(t) half as wide.
+function torsoPlate({ a0 = 0, y0, y1, width, lift, nu = 14, nv = 14, rows = easeRows, uvOf }) {
+  return plateGeometry((u, v, top) => {
+    const t = rows(v);
+    const y = lerp(y0, y1, t);
+    const a = a0 + Math.asin(clamp(((2 * u - 1) * width(t)) / torsoR(y), -1, 1));
+    return torsoAt(a, y, top ? lift : -0.006);
+  }, nu, nv, uvOf);
 }
 
 // Accordion tube, unit length hanging down from the origin; scale.y sets its length,
@@ -203,11 +356,6 @@ function bellowsGeometry(rIn, rOut, folds) {
   return new THREE.LatheGeometry(pts, 20);
 }
 
-// Spherical cap pointing along +z (iris, pupil).
-function capGeometry(r, angle) {
-  return new THREE.SphereGeometry(r, 28, 6, 0, TAU, 0, angle).rotateX(Math.PI / 2);
-}
-
 function heartGeometry(size) {
   const s = new THREE.Shape();
   s.moveTo(0, -size * 0.75);
@@ -218,28 +366,97 @@ function heartGeometry(size) {
 
 function makeMaterials() {
   const phys = (o) => new THREE.MeshPhysicalMaterial(o);
-  return {
-    blue: phys({ color: 0x3f9be0, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.12 }),
-    lid: phys({ color: 0x3f9be0, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.12, side: THREE.DoubleSide }),
-    blueSoft: phys({ color: 0x7cc0ee, roughness: 0.35, clearcoat: 0.8, clearcoatRoughness: 0.2 }),
-    navy: phys({ color: 0x1b2d4a, roughness: 0.45, clearcoat: 0.4 }),
-    joint: phys({ color: 0x283246, roughness: 0.55, metalness: 0.3 }),
-    silver: phys({ color: 0xd3dde6, roughness: 0.25, metalness: 0.6, clearcoat: 0.6 }),
-    steel: phys({ color: 0x8e9fb2, roughness: 0.35, metalness: 0.7 }),
+  const M = {
+    blue: phys({ color: 0x64c3f2, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.12 }),
+    lid: phys({ color: 0x64c3f2, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.12, side: THREE.DoubleSide }),
+    blueSoft: phys({ color: 0x9fdaf7, roughness: 0.32, clearcoat: 0.8, clearcoatRoughness: 0.18 }),
+    blueDeep: phys({ color: 0x2a7cc2, roughness: 0.35, clearcoat: 0.8, clearcoatRoughness: 0.2 }),
+    armor: phys({ color: 0x47a3e3, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.14 }),
+    plate: phys({ color: 0xb2cde9, roughness: 0.3, metalness: 0.15, clearcoat: 0.8, clearcoatRoughness: 0.16 }),
+    cup: phys({ color: 0x8fb1d8, roughness: 0.3, metalness: 0.2, clearcoat: 0.8, clearcoatRoughness: 0.16 }),
+    navy: phys({ color: 0x1c2a50, roughness: 0.45, clearcoat: 0.4 }),
+    slate: phys({ color: 0x3e4d7a, roughness: 0.4, clearcoat: 0.5 }),
+    joint: phys({ color: 0x1e2944, roughness: 0.5, metalness: 0.25 }),
+    silver: phys({ color: 0xc3d5e8, roughness: 0.28, metalness: 0.3, clearcoat: 0.7 }),
+    steel: phys({ color: 0x6f87a9, roughness: 0.36, metalness: 0.3, clearcoat: 0.4 }),
     white: phys({ color: 0xffffff, roughness: 0.08, clearcoat: 1, clearcoatRoughness: 0.03 }),
-    iris: phys({ color: 0x86993a, roughness: 0.25, clearcoat: 1 }),
-    pupil: phys({ color: 0x06080c, roughness: 0.1, clearcoat: 1 }),
+    // iris layers sit a hair above the eye white; the offsets keep them winning the depth test
+    irisInk: new THREE.MeshBasicMaterial({ color: INK, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+    iris: phys({ color: 0x7f8f2c, roughness: 0.25, clearcoat: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+    pupil: phys({ color: 0x06080c, roughness: 0.1, clearcoat: 1, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }),
     heart: phys({ color: 0xff4f8e, emissive: 0xff2470, emissiveIntensity: 0.45, roughness: 0.25, clearcoat: 1 }),
-    orange: new THREE.MeshStandardMaterial({ color: 0xffae2e, emissive: 0xff8a00, emissiveIntensity: 0.6, roughness: 0.3 }),
-    glow: new THREE.MeshStandardMaterial({ color: 0x5ee0ff, emissive: 0x5ee0ff, emissiveIntensity: 1.6, roughness: 0.2 }),
+    orange: new THREE.MeshStandardMaterial({ color: 0xff9800, emissive: 0xff6a00, emissiveIntensity: 0.18, roughness: 0.22, toneMapped: false }),
+    glow: phys({ color: 0x64c3f2, emissive: 0x5ee0ff, emissiveIntensity: 0.4, roughness: 0.25, clearcoat: 1 }),
     catchlight: new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    ink: new THREE.MeshBasicMaterial({ color: INK }),
   };
+  // rivets: a navy dot with a bright head, too small for a hull of their own
+  M.dot = M.navy.clone();
+  M.dotSilver = M.silver.clone();
+  M.dotOrange = M.orange.clone();
+  // drawn without a hull: highlights, the ink itself, and painted-on parts
+  for (const k of ['catchlight', 'ink', 'irisInk', 'iris', 'pupil', 'dot', 'dotSilver', 'dotOrange']) M[k].userData.noOutline = true;
+  for (const k of ['blue', 'blueSoft', 'blueDeep', 'armor', 'plate', 'cup', 'glow']) shadeEdges(M[k], EDGE.blue);
+  for (const k of ['navy', 'slate', 'joint', 'silver', 'steel']) shadeEdges(M[k], EDGE.metal);
+  shadeEdges(M.white, EDGE.white);
+  return M;
+}
+
+// Cartoon ink lines: each part also draws its back faces, pushed out along the normals
+// and filled with ink, so a dark rim shows wherever it sits in front of something else.
+function outlineMaterial(jellyUniforms) {
+  const m = new THREE.MeshBasicMaterial({ color: INK, side: THREE.BackSide });
+  m.onBeforeCompile = (shader) => {
+    let decl = '';
+    let move = '';
+    if (jellyUniforms) {
+      Object.assign(shader.uniforms, jellyUniforms);
+      decl = 'uniform float uJellyAmp;\nuniform float uJellyTime;\nuniform vec3 uJellyDir;';
+      move = 'transformed += normal * sin(dot(position, uJellyDir) * 9.0 - uJellyTime * 24.0) * uJellyAmp;';
+    }
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>\n${decl}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${move}`)
+      .replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>\nmvPosition.xyz += normalize(normalMatrix * normal) * ${LINE.toFixed(4)};\ngl_Position = projectionMatrix * mvPosition;`,
+      );
+  };
+  m.customProgramCacheKey = () => (jellyUniforms ? 'outline-jelly' : 'outline');
+  return m;
+}
+const OUTLINE = outlineMaterial();
+
+// Eyelid: a skin over the eye white that only shows past its cut lines, edged in ink.
+// cut = (upper lid height, lower lid height, upper slope, lower slope) in eye space.
+function lidMaterial(base) {
+  const m = shadeEdges(base.clone(), EDGE.blue);
+  m.side = THREE.FrontSide;
+  m.userData.noOutline = true;
+  m.userData.cut = { value: new THREE.Vector4(1, -1, 0, 0) };
+  const ink = new THREE.Color(INK);
+  return patchShader(m, 'lid', (shader) => {
+    shader.uniforms.uCut = m.userData.cut;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vLid;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLid = position.xy;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vLid;\nuniform vec4 uCut;')
+      .replace(
+        'void main() {',
+        'void main() {\nfloat lidIn = max(vLid.y - uCut.x - uCut.z * vLid.x, uCut.y + uCut.w * vLid.x - vLid.y);\nif (lidIn < 0.0) discard;',
+      )
+      .replace(
+        '#include <opaque_fragment>',
+        `#include <opaque_fragment>\ngl_FragColor.rgb = mix(vec3(${ink.r.toFixed(4)}, ${ink.g.toFixed(4)}, ${ink.b.toFixed(4)}), gl_FragColor.rgb, smoothstep(0.009, 0.016, lidIn));`,
+      );
+  });
 }
 
 // Soft-body ripple: vertices slide along their normals in a travelling wave whose
 // amplitude is kicked by impacts and pokes, so the shell jiggles like jelly.
 function jellify(material, uniforms) {
-  material.onBeforeCompile = (shader) => {
+  return patchShader(material, 'jelly', (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nuniform float uJellyAmp;\nuniform float uJellyTime;\nuniform vec3 uJellyDir;')
@@ -247,12 +464,37 @@ function jellify(material, uniforms) {
         '#include <begin_vertex>',
         '#include <begin_vertex>\ntransformed += objectNormal * sin(dot(position, uJellyDir) * 9.0 - uJellyTime * 24.0) * uJellyAmp;',
       );
+  });
+}
+
+// Stacks a shader tweak on whatever the material already has, and keys its program.
+function patchShader(material, key, patch) {
+  const prev = material.onBeforeCompile;
+  const prevKey = material.customProgramCacheKey();
+  material.onBeforeCompile = (shader, renderer) => {
+    prev.call(material, shader, renderer);
+    patch(shader);
   };
-  material.customProgramCacheKey = () => 'jelly';
+  material.customProgramCacheKey = () => `${prevKey}|${key}`;
   return material;
 }
 
-function mesh(geo, mat, parent, { pos, rot, scale, shadow = false } = {}) {
+// Cartoon shading: the colour deepens toward the silhouette, as on the character sheet.
+// edge is how much of the colour is left where the surface turns away from the viewer.
+function shadeEdges(material, edge) {
+  return patchShader(material, `edge${edge}`, (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_maps>',
+      `#include <normal_fragment_maps>
+      {
+        vec3 toEye = isOrthographic ? vec3(0.0, 0.0, 1.0) : normalize(vViewPosition);
+        diffuseColor.rgb *= mix(${edge.toFixed(3)}, 1.0, pow(clamp(dot(normal, toEye), 0.0, 1.0), 0.6));
+      }`,
+    );
+  });
+}
+
+function mesh(geo, mat, parent, { pos, rot, scale, shadow = false, outline = OUTLINE } = {}) {
   const m = new THREE.Mesh(geo, mat);
   if (pos) m.position.set(...pos);
   if (rot) m.rotation.set(...rot);
@@ -260,6 +502,7 @@ function mesh(geo, mat, parent, { pos, rot, scale, shadow = false } = {}) {
   m.castShadow = shadow;
   m.receiveShadow = true;
   parent.add(m);
+  if (outline && !mat.userData.noOutline) m.add(new THREE.Mesh(geo, outline));
   return m;
 }
 
@@ -295,14 +538,21 @@ export class Robot {
     this.M = makeMaterials();
     // shared by the head shell, its painted face and the torso so they ripple together
     this.jellyU = { uJellyAmp: { value: 0 }, uJellyTime: { value: 0 }, uJellyDir: { value: new THREE.Vector3(0, 1, 0) } };
-    this.M.shell = jellify(this.M.blue.clone(), this.jellyU);
-    this.M.body = jellify(this.M.blue.clone(), this.jellyU);
+    this.M.shell = jellify(shadeEdges(this.M.blue.clone(), EDGE.blue), this.jellyU);
+    this.M.body = jellify(shadeEdges(this.M.armor.clone(), EDGE.blue), this.jellyU);
+    this.M.jaw = jellify(shadeEdges(this.M.armor.clone(), EDGE.blue), this.jellyU);
+    this.M.rim = jellify(shadeEdges(this.M.navy.clone(), EDGE.metal), this.jellyU);
+    this.M.outlineJelly = outlineMaterial(this.jellyU);
     this.jellyAmp = 0;
     this.geo = {
-      armBellows: bellowsGeometry(0.04, 0.052, 3),
-      legBellows: bellowsGeometry(0.056, 0.074, 4),
-      neckBellows: bellowsGeometry(0.085, 0.105, 2),
-      finger: new THREE.CapsuleGeometry(0.02, 0.04, 4, 10),
+      armBellows: bellowsGeometry(0.031, 0.043, 4),
+      legBellows: bellowsGeometry(0.044, 0.06, 4),
+      knuckle: new THREE.SphereGeometry(0.017, 12, 8),
+      hook: new THREE.TorusGeometry(0.028, 0.016, 8, 14, (150 * Math.PI) / 180),
+      fingertip: new THREE.SphereGeometry(0.016, 10, 8),
+      thumb: new THREE.CapsuleGeometry(0.016, 0.03, 4, 10), // also the straight part of a finger
+      rivet: new THREE.SphereGeometry(0.014, 12, 8),
+      rivetHead: new THREE.SphereGeometry(0.008, 10, 6),
     };
 
     // root > hangPivot (swings when held by the head) > squash > yaw > body
@@ -385,31 +635,71 @@ export class Robot {
   buildTorso() {
     const { M } = this;
     const B = this.bodyInner;
-    this.torso = mesh(new THREE.LatheGeometry(torsoPoints(), 48), M.body, B, { scale: [1, 1, 0.85], shadow: true });
+    this.torso = mesh(new THREE.LatheGeometry(TORSO_POINTS, 44), M.body, B, { scale: [1, 1, TORSO_Z], shadow: true, outline: M.outlineJelly });
+    mesh(new THREE.CylinderGeometry(0.1, 0.112, 0.14, 28), M.navy, this.neck, { pos: [0, 0.05, 0] }); // turns with the head
+
+    // chest display, curved to the belly
     this.chest = new ChestScreen();
-    const screenMat = new THREE.MeshBasicMaterial({ map: this.chest.texture, toneMapped: false, transparent: true });
-    mesh(new THREE.PlaneGeometry(0.31, 0.18), screenMat, B, { pos: [0, 0.87, 0.292] });
+    const screen = { w: 0.336, h: 0.204 };
+    const screenWidth = roundedRect(screen.w, screen.h, 0.036);
+    const screenMat = new THREE.MeshBasicMaterial({ map: this.chest.texture, toneMapped: false });
+    screenMat.userData.noOutline = true;
+    const screenGeo = torsoPlate({
+      y0: 0.706, y1: 0.91, width: screenWidth, lift: 0.034, nu: 20, nv: 14,
+      uvOf: (u, v) => [0.5 + ((2 * u - 1) * screenWidth(easeRows(v))) / screen.w, easeRows(v)],
+    });
+    mesh(screenGeo, screenMat, B);
 
     const parts = new Batch();
-    const pelvis = torsoPoints()
-      .filter((p) => p.y <= 0.6)
-      .map((p) => new THREE.Vector2(p.x * 1.025, p.y));
-    parts.add(new THREE.LatheGeometry(pelvis, 48), M.navy, { scale: [1, 1, 0.86] });
-    parts.add(new RoundedBoxGeometry(0.2, 0.085, 0.05, 3, 0.02), M.blueSoft, { pos: [0, 0.53, 0.23] });
-    parts.add(new RoundedBoxGeometry(0.38, 0.25, 0.07, 4, 0.035), M.silver, { pos: [0, 0.87, 0.255] });
-    parts.add(new RoundedBoxGeometry(0.14, 0.07, 0.05, 3, 0.022), M.orange, { pos: [0, 0.665, 0.27] });
-    parts.add(new RoundedBoxGeometry(0.3, 0.22, 0.06, 3, 0.03), M.steel, { pos: [0, 0.84, -0.255] });
-    for (let i = 0; i < 3; i++) {
-      parts.add(new THREE.BoxGeometry(0.16, 0.018, 0.02), M.navy, { pos: [0, 0.8 + i * 0.04, -0.287] });
+    const pelvis = TORSO_POINTS.filter((p) => p.y <= 0.57).map((p) => new THREE.Vector2(p.x * 1.022, p.y));
+    parts.add(new THREE.LatheGeometry(pelvis, 44), M.navy, { scale: [1, 1, TORSO_Z * 1.01] });
+    parts.add(new THREE.TorusGeometry(0.12, 0.03, 10, 32), M.navy, { pos: [0, 1.035, 0], rot: [Math.PI / 2, 0, 0], scale: [1, TORSO_Z, 1] });
+
+    // front: silver frame round the screen, a lighter belly plate below it, the orange light
+    parts.add(torsoPlate({ y0: 0.655, y1: 0.958, width: roundedRect(0.43, 0.303, 0.05), lift: 0.02 }), M.silver);
+    parts.add(torsoPlate({ y0: 0.45, y1: 0.672, width: polyline([0, 0.24], [0.35, 0.37], [0.8, 0.43], [1, 0.41]), lift: 0.012, rows: (v) => v }), M.plate);
+    parts.add(torsoPlate({ y0: 0.54, y1: 0.66, width: (t) => lerp(0.062, 0.102, t) - 0.012 * (Math.abs(t - 0.5) > 0.42 ? 1 : 0), lift: 0.036, nu: 10, nv: 8 }), M.orange);
+    for (const s of [-1, 1]) {
+      parts.add(this.geo.rivet, M.dot, { pos: torsoAt(Math.asin((s * 0.158) / torsoR(0.925)), 0.925, 0.022).toArray() });
+      parts.add(this.geo.rivetHead, M.dotOrange, { pos: torsoAt(Math.asin((s * 0.158) / torsoR(0.925)), 0.925, 0.032).toArray() });
+      parts.add(this.geo.rivet, M.dot, { pos: torsoAt(Math.asin((s * 0.168) / torsoR(0.683)), 0.683, 0.02).toArray() });
+      parts.add(this.geo.rivetHead, M.dotSilver, { pos: torsoAt(Math.asin((s * 0.168) / torsoR(0.683)), 0.683, 0.03).toArray() });
+      // side armour with a vent below it
+      parts.add(torsoPlate({ a0: s * 0.98, y0: 0.785, y1: 0.93, width: roundedRect(0.1, 0.145, 0.025), lift: 0.014, nu: 6, nv: 10 }), M.plate);
+      parts.add(torsoPlate({ a0: s * 0.98, y0: 0.69, y1: 0.765, width: roundedRect(0.1, 0.075, 0.012), lift: 0.012, nu: 6, nv: 8 }), M.navy);
+      for (const y of [0.708, 0.727, 0.746]) {
+        parts.add(torsoPlate({ a0: s * 0.98, y0: y - 0.004, y1: y + 0.004, width: () => 0.038, lift: 0.016, nu: 4, nv: 1, rows: (v) => v }), M.steel);
+      }
     }
-    parts.add(this.geo.neckBellows, M.joint, { pos: [0, NECK_Y + 0.14, 0], scale: [1, 0.22, 1] });
+
+    // back: a service hatch with two screws and a vent, and a tab on the hips
+    const back = Math.PI;
+    parts.add(torsoPlate({ a0: back, y0: 0.62, y1: 0.925, width: roundedRect(0.4, 0.305, 0.045), lift: 0.02 }), M.steel);
+    parts.add(torsoPlate({ a0: back, y0: 0.645, y1: 0.785, width: (t) => lerp(0.085, 0.06, t), lift: 0.03, nu: 8, nv: 6, rows: (v) => v }), M.navy);
+    for (let i = 0; i < 4; i++) {
+      const y = 0.667 + i * 0.03;
+      parts.add(torsoPlate({ a0: back, y0: y - 0.006, y1: y + 0.006, width: () => lerp(0.078, 0.055, (y - 0.645) / 0.14), lift: 0.036, nu: 4, nv: 1, rows: (v) => v }), M.steel);
+    }
+    for (const s of [-1, 1]) {
+      const a = back + Math.asin((s * 0.135) / torsoR(0.87));
+      parts.add(new THREE.CylinderGeometry(0.026, 0.026, 0.012, 20), M.silver, { pos: torsoAt(a, 0.87, 0.026).toArray(), rot: [Math.PI / 2, 0, 0] });
+      parts.add(new THREE.BoxGeometry(0.036, 0.008, 0.008), M.navy, { pos: torsoAt(a, 0.87, 0.033).toArray(), rot: [0, 0, s * 0.7] });
+      parts.add(torsoPlate({ a0: back + Math.asin((s * 0.155) / torsoR(0.74)), y0: 0.7, y1: 0.775, width: () => 0.011, lift: 0.03, nu: 2, nv: 4 }), M.navy);
+    }
+    parts.add(torsoPlate({ a0: back, y0: 0.43, y1: 0.54, width: (t) => lerp(0.085, 0.12, t), lift: 0.028, nu: 10, nv: 6, rows: (v) => v }), M.blueSoft);
     parts.into(B, { shadow: true });
   }
 
   buildHead() {
-    const { M } = this;
+    const { M, geo } = this;
     const H = this.head;
-    mesh(headGeometry(), M.shell, H, { shadow: true });
+    mesh(headGeometry(), M.shell, H, { shadow: true, outline: M.outlineJelly });
+    // The jaw is a deeper blue panel of the same shell, tipped so it rides higher round the
+    // back (its seam is inked below), with just a thin navy edge underneath.
+    const jaw = { angle: 0.9, tip: 0.25 };
+    const cap = (angle, tip, inflate) => headGeometry(new THREE.SphereGeometry(1, 72, 12, 0, TAU, Math.PI - angle, angle).rotateX(tip), inflate);
+    mesh(cap(jaw.angle, jaw.tip, 1.003), M.jaw, H, { outline: null });
+    mesh(cap(0.45, 0, 1.006), M.rim, H, { outline: null });
 
     this.face = new FaceDecal();
     const faceMat = jellify(new THREE.MeshStandardMaterial({
@@ -421,82 +711,156 @@ export class Robot {
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2,
     }), this.jellyU);
-    mesh(faceGeometry(), faceMat, H, { shadow: false });
+    mesh(faceGeometry(), faceMat, H, { shadow: false, outline: null });
 
     const parts = new Batch();
-    const v = new THREE.Vector3();
-    const onHead = (x, y, z, inflate = 1) => headPoint(v.set(x, y, z).normalize(), new THREE.Vector3(), inflate).toArray();
-    const rivet = new THREE.SphereGeometry(0.016, 12, 8);
+    const rivet = (p, head = M.dotSilver) => {
+      parts.add(geo.rivet, M.dot, { pos: p.toArray() });
+      parts.add(geo.rivetHead, head, { pos: p.clone().multiplyScalar(1.012).toArray() });
+    };
+    // panel seams: across the forehead, a cap on the back, down each side through the ear
+    const seam = (pts) => {
+      const curve = new THREE.CatmullRomCurve3(pts);
+      parts.add(new THREE.TubeGeometry(curve, pts.length * 8, 0.0062, 6), M.ink);
+    };
+    const front = [[-0.3, 0.418], [-0.262, 0.38], [-0.13, 0.371], [0, 0.37], [0.13, 0.371], [0.262, 0.38], [0.3, 0.418]];
+    seam(front.map(([x, y]) => headAt({ x, y })));
+    const crown = [[-0.31, 0.43], [-0.25, 0.31], [-0.13, 0.225], [0, 0.2], [0.13, 0.225], [0.25, 0.31], [0.31, 0.43]];
+    seam(crown.map(([x, y]) => headAt({ x, y, back: true })));
+    const tipJaw = new THREE.Matrix4().makeRotationX(jaw.tip);
+    const jawLine = [];
+    for (let i = 0; i < 48; i++) {
+      const a = (i / 48) * TAU;
+      const r = Math.sin(jaw.angle);
+      const dir = new THREE.Vector3(r * Math.cos(a), -Math.cos(jaw.angle), r * Math.sin(a)).applyMatrix4(tipJaw);
+      jawLine.push(headPoint(dir, new THREE.Vector3(), 1.003));
+    }
+    parts.add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(jawLine, true), 192, 0.0062, 6, true), M.ink);
     for (const s of [-1, 1]) {
-      for (const [x, y, z] of [[0.62, 0.52, 0.55], [0.78, -0.4, 0.5], [0.4, -0.8, -0.45]]) {
-        parts.add(rivet, M.silver, { pos: onHead(s * x, y, z) });
-      }
-      // headphone-style ear cup with an orange light
+      seam([0.455, 0.4, 0.3, 0.2, 0.135].map((y) => headAt({ y, z: lerp(-0.035, -0.06, (0.455 - y) / 0.32), side: s })));
+      seam([-0.335, -0.38, -0.43].map((y) => headAt({ y, z: -0.075, side: s })));
+      for (const [x, y] of [[0.495, -0.03], [0.36, -0.29]]) rivet(headAt({ x: s * x, y }));
+      for (const [y, z] of [[0.265, -0.1], [0.39, 0.25], [-0.24, -0.4], [-0.28, 0.26]]) rivet(headAt({ y, z, side: s }));
+      for (const [x, y] of [[0.3, -0.395], [0.18, -0.315]]) rivet(headAt({ x: s * x, y, back: true }, 1.016));
+
+      // headphone-style ear disc, its top tipped out a little: a straight-sided steel-blue
+      // cup, then a flat navy rim, a silver ring and a domed orange lens
       const ear = new THREE.Matrix4().compose(
-        new THREE.Vector3(s * 0.545, -0.02, -0.03),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, -s * (Math.PI / 2))),
+        new THREE.Vector3(s * 0.48, EAR.y, EAR.z),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, -s * (Math.PI / 2 + 0.14))),
         new THREE.Vector3(1, 1, 1),
       );
-      parts.add(new THREE.CylinderGeometry(0.16, 0.185, 0.16, 36), M.silver, { pos: [0, 0.03, 0] }, ear);
-      parts.add(new THREE.TorusGeometry(0.15, 0.022, 8, 36), M.navy, { pos: [0, 0.112, 0], rot: [Math.PI / 2, 0, 0] }, ear);
-      parts.add(new THREE.CylinderGeometry(0.105, 0.105, 0.03, 40), M.orange, { pos: [0, 0.11, 0] }, ear);
+      const lathe = (pts) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), 56);
+      parts.add(lathe([[0.001, 0], [0.218, 0], [0.226, 0.008], [0.226, 0.122], [0.218, 0.13], [0.001, 0.13]]), M.cup, {}, ear);
+      const rim = [[0.19, 0.126], [0.228, 0.126], [0.234, 0.132], [0.234, 0.16], [0.228, 0.166], [0.196, 0.166], [0.19, 0.16], [0.19, 0.126]];
+      parts.add(lathe(rim), M.navy, {}, ear);
+      parts.add(new THREE.CylinderGeometry(0.192, 0.192, 0.02, 56), M.silver, { pos: [0, 0.142, 0] }, ear);
+      parts.add(new THREE.CylinderGeometry(0.137, 0.137, 0.006, 48), M.ink, { pos: [0, 0.154, 0] }, ear); // dark line round the lens
+      // lens: a cap 0.125 round at the base and 0.065 high
+      const lens = (0.125 ** 2 + 0.065 ** 2) / 0.13;
+      parts.add(new THREE.SphereGeometry(lens, 40, 10, 0, TAU, 0, Math.asin(0.125 / lens)), M.orange, { pos: [0, 0.222 - lens, 0] }, ear);
     }
-    parts.add(rivet, M.orange, { pos: onHead(0, 0.82, 0.58) });
-    // dark plate on the back of the head, like the reference's back view
-    parts.add(new RoundedBoxGeometry(0.46, 0.13, 0.08, 3, 0.035), M.navy, { pos: onHead(0, -0.5, -1, 0.94), rot: [-0.45, 0, 0] });
-    parts.add(new THREE.CylinderGeometry(0.05, 0.085, 0.07, 28), M.steel, { pos: [0, HEAD.top - 0.015, 0] }); // antenna base
+    rivet(headAt({ x: 0, y: 0.41 }), M.dotOrange);
+    rivet(headAt({ x: 0, y: 0.3, back: true }));
+    // raised plate on the back of the jaw
+    // A plate on the back of the jaw, nearly flush so it reads as part of the shell; its
+    // edge is inked on the surface instead of getting a hull.
+    const plate = { y0: -0.44, y1: -0.28, width: (t) => lerp(0.38, 0.25, t), lift: 0.007, back: true };
+    mesh(headPlate(plate), M.slate, H, { outline: null, shadow: true });
+    const plateEdge = [];
+    const n = 8;
+    for (let i = 0; i < 4 * n; i++) {
+      const k = (i % n) / n;
+      const [u, v] = [[k, 0], [1, k], [1 - k, 1], [0, 1 - k]][Math.floor(i / n)];
+      const t = easeRows(v);
+      const p = headAt({ x: -(2 * u - 1) * plate.width(t), y: lerp(plate.y0, plate.y1, t), back: true });
+      plateEdge.push(p.addScaledVector(p.clone().normalize(), plate.lift));
+    }
+    parts.add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(plateEdge, true, 'centripetal'), 128, 0.0062, 6, true), M.ink);
+    // antenna mount: a steel bell on a navy flange
+    const bell = [[0.001, -0.02], [0.1, -0.015], [0.104, 0.004], [0.086, 0.03], [0.06, 0.052], [0.034, 0.066], [0.001, 0.07]];
+    parts.add(new THREE.LatheGeometry(bell.map(([r, y]) => new THREE.Vector2(r, y)), 36), M.steel, { pos: [0, HEAD.top - 0.012, 0] });
+    parts.add(new THREE.TorusGeometry(0.098, 0.014, 8, 36), M.navy, { pos: [0, HEAD.top - 0.008, 0], rot: [Math.PI / 2, 0, 0] });
     parts.into(H, { shadow: true });
   }
 
   buildEye(side) {
     const { M } = this;
-    const dir = new THREE.Vector3(Math.sin(EYE.angle) * side, EYE.lat, Math.cos(EYE.angle)).normalize();
-    const surface = headPoint(dir, new THREE.Vector3());
+    const cx = side * EYE.x;
+    // The eye's frame sits on the face with z along its normal; the lids cut in its xy.
+    const p0 = headAt({ x: cx, y: EYE.y });
+    const n0 = new THREE.Vector3()
+      .crossVectors(headAt({ x: cx + 0.01, y: EYE.y }).sub(p0), headAt({ x: cx, y: EYE.y + 0.01 }).sub(p0))
+      .normalize();
     const socket = new THREE.Group();
-    socket.position.copy(surface).multiplyScalar(EYE.sink);
-    socket.quaternion.setFromUnitVectors(FWD, new THREE.Vector3(side * 0.3, -0.04, 1).normalize());
+    socket.position.copy(p0);
+    socket.quaternion.setFromUnitVectors(FWD, n0);
     this.head.add(socket);
+    socket.updateMatrix();
+    const toLocal = socket.matrix.clone().invert();
 
-    // dark rim where the eyeball meets the head shell
-    const lip = surface.length() * (1 - EYE.sink);
-    const ringR = Math.sqrt(Math.max(EYE.r ** 2 - lip ** 2, 0.01));
-    mesh(new THREE.TorusGeometry(ringR + 0.014, 0.032, 12, 40), M.navy, socket, { pos: [0, 0, lip] });
+    // Every part is a plate laid on the face, so the eye stays round however the head
+    // curves under it; shapeEye() lays them out.
+    const plate = (nu, nv, mat, opts) => mesh(plateGeometry(() => new THREE.Vector3(), nu, nv), mat, socket, opts);
+    const lidMat = lidMaterial(M.lid);
+    const eye = {
+      side,
+      cx,
+      socket,
+      place: (p) => p.applyMatrix4(toLocal),
+      white: plate(48, 8, M.white),
+      ring: plate(48, 2, M.navy), // thick navy rim round the white
+      irisInk: plate(32, 3, M.irisInk, { shadow: false }),
+      iris: plate(32, 3, M.iris, { shadow: false }),
+      pupil: plate(32, 3, M.pupil, { shadow: false }),
+      lid: plate(48, 8, lidMat),
+      lidMat,
+      heart: mesh(heartGeometry(0.075), M.heart, socket, { shadow: false }),
+      // catchlights stay put while the iris moves: that is what makes eyes look wet
+      catchlights: [
+        mesh(new THREE.SphereGeometry(0.025, 16, 10), M.catchlight, socket, { shadow: false }),
+        mesh(new THREE.SphereGeometry(0.01, 12, 8), M.catchlight, socket, { shadow: false }),
+      ],
+    };
+    eye.heart.visible = false;
+    this.shapeEye(eye, 1, 0, 0, 1, 1);
+    return eye;
+  }
 
-    const ball = new THREE.Group();
-    socket.add(ball);
-    mesh(new THREE.SphereGeometry(EYE.r, 32, 24), M.white, ball);
-    const iris = mesh(capGeometry(EYE.r * 1.004, 0.6), M.iris, ball, { shadow: false });
-    const pupil = new THREE.Group();
-    ball.add(pupil);
-    mesh(capGeometry(EYE.r * 1.008, 0.33), M.pupil, pupil, { shadow: false });
-    const heart = mesh(heartGeometry(0.075), M.heart, ball, { pos: [0, 0, EYE.r - 0.01], shadow: false });
-    heart.visible = false;
-
-    // Eyelids are hemispherical shells that roll down over the eyeball.
-    const lidR = EYE.r * 1.1;
-    const upperPivot = new THREE.Group();
-    const lowerPivot = new THREE.Group();
-    socket.add(upperPivot, lowerPivot);
-    const upper = mesh(new THREE.SphereGeometry(lidR, 32, 12, 0, TAU, 0, Math.PI / 2), M.lid, upperPivot);
-    const lower = mesh(new THREE.SphereGeometry(lidR, 32, 12, 0, TAU, Math.PI / 2, Math.PI / 2), M.lid, lowerPivot);
-
-    // Catchlights stay fixed while the eyeball rolls: that is what makes eyes look wet.
-    const at = (x, y, z, r) => new THREE.Vector3(x, y, z).normalize().multiplyScalar(r).toArray();
-    const c1 = mesh(new THREE.SphereGeometry(0.022, 16, 10), M.catchlight, socket, { pos: at(-0.38, 0.42, 0.82, EYE.r * 0.96), shadow: false });
-    const c2 = mesh(new THREE.SphereGeometry(0.011, 12, 8), M.catchlight, socket, { pos: at(0.3, -0.3, 0.9, EYE.r * 0.97), shadow: false });
-
-    return { side, socket, ball, iris, pupil, heart, upper, lower, upperPivot, lowerPivot, catchlights: [c1, c2] };
+  // Lays the eye's plates out for its size, the gaze offset and iris and pupil scales.
+  shapeEye(eye, size, ox, oy, irisK, pupilK) {
+    const key = [size, ox, oy, irisK, pupilK].map((v) => Math.round(v * 2000)).join();
+    if (key === eye.key) return;
+    eye.key = key;
+    const rx = EYE.rx * size;
+    const ry = EYE.ry * size;
+    const surface = eyeSurface(eye.cx, EYE.y, rx, ry);
+    const { place } = eye;
+    if (size !== eye.size) {
+      eye.size = size;
+      const rim = (v) => Math.sin((v * Math.PI) / 2); // rows crowd the steep edge of the dome
+      reshapePlate(eye.white.geometry, eyeDisc(surface, place, { rx, ry, rows: rim, sink: -0.012 }));
+      reshapePlate(eye.ring.geometry, eyeDisc(surface, place, { rx, ry, k0: 1, grow0: -0.006, grow1: 0.032, lift: 0.016 }));
+      reshapePlate(eye.lid.geometry, eyeDisc(surface, place, { rx, ry, grow1: 0.012, rows: rim, lift: 0.01, sink: 0.004 }));
+      eye.catchlights[0].position.copy(place(surface(0.03 * size, 0.036 * size, 0.008)));
+      eye.catchlights[1].position.copy(place(surface(-0.042 * size, -0.046 * size, 0.008)));
+    }
+    const dot = (r, lift) => eyeDisc(surface, place, { rx: r, ry: r, ox, oy, lift, sink: lift - 0.004 });
+    reshapePlate(eye.irisInk.geometry, dot(EYE.iris * size * irisK * 1.08, 0.002));
+    reshapePlate(eye.iris.geometry, dot(EYE.iris * size * irisK, 0.004));
+    reshapePlate(eye.pupil.geometry, dot(EYE.pupil * size * pupilK, 0.006));
+    eye.heart.position.copy(place(surface(ox, oy, 0.004)));
   }
 
   buildAntenna() {
     const { M } = this;
     this.antenna = new THREE.Group();
-    this.antenna.position.y = HEAD.top + 0.015;
+    this.antenna.position.y = HEAD.top + 0.045; // top of the mount
     this.head.add(this.antenna);
-    mesh(new THREE.CylinderGeometry(0.016, 0.022, 0.26, 12), M.navy, this.antenna, { pos: [0, 0.13, 0] });
-    this.antennaBall = mesh(new THREE.SphereGeometry(0.068, 32, 20), M.glow, this.antenna, { pos: [0, 0.29, 0], shadow: false });
+    mesh(new THREE.CylinderGeometry(0.012, 0.014, 0.28, 10), M.navy, this.antenna, { pos: [0, 0.13, 0] });
+    this.antennaBall = mesh(new THREE.SphereGeometry(0.065, 32, 20), M.glow, this.antenna, { pos: [0, 0.31, 0], shadow: false });
     this.antennaLight = new THREE.PointLight(0x5ee0ff, 0.35, 1.6, 2);
-    this.antennaLight.position.y = 0.29;
+    this.antennaLight.position.y = 0.31;
     this.antenna.add(this.antennaLight);
   }
 
@@ -505,22 +869,49 @@ export class Robot {
     const shoulder = new THREE.Group();
     shoulder.position.set(side * SHOULDER.x, SHOULDER.y, 0);
     this.bodyInner.add(shoulder);
-    mesh(new THREE.SphereGeometry(0.09, 24, 16), M.blue, shoulder, { shadow: true });
-    mesh(geo.armBellows, M.joint, shoulder, { pos: [0, -0.04, 0], scale: [1, 0.17, 1], shadow: true });
+    mesh(new THREE.SphereGeometry(0.07, 24, 16), M.blue, shoulder, { pos: [side * 0.006, 0.012, 0], scale: [1, 0.85, 1], shadow: true });
+    mesh(new THREE.TorusGeometry(0.046, 0.018, 8, 24), M.navy, shoulder, { pos: [0, -0.062, 0], rot: [Math.PI / 2, 0, 0] });
+    mesh(geo.armBellows, M.joint, shoulder, { pos: [0, -0.05, 0], scale: [1, 0.18, 1], shadow: true });
 
+    // forearm: a silver bracer with a round emblem on the outside, between navy bands
     const elbow = new THREE.Group();
-    elbow.position.y = -0.22;
+    elbow.position.y = -0.225;
     shoulder.add(elbow);
     const parts = new Batch();
-    parts.add(new THREE.SphereGeometry(0.052, 24, 16), M.silver);
-    parts.add(new THREE.CapsuleGeometry(0.056, 0.11, 6, 14), M.blueSoft, { pos: [0, -0.1, 0] });
-    parts.add(new THREE.CylinderGeometry(0.066, 0.066, 0.045, 28), M.silver, { pos: [0, -0.15, 0] });
-    const hand = new THREE.Matrix4().makeTranslation(0, -0.22, 0);
-    parts.add(new THREE.SphereGeometry(0.068, 20, 14), M.blue, { scale: [1, 0.9, 0.85] }, hand);
-    for (const [x, z, a] of [[-0.035, 0.02, -0.25], [0, 0.03, 0], [0.035, 0.02, 0.25]]) {
-      parts.add(geo.finger, M.silver, { pos: [x, -0.07, z], rot: [0.25, 0, a] }, hand);
+    const facing = (x, y, z) =>
+      new THREE.Euler().setFromQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(x, y, z).normalize())).toArray();
+    parts.add(new THREE.SphereGeometry(0.044, 20, 14), M.navy);
+    parts.add(new THREE.CylinderGeometry(0.062, 0.062, 0.02, 28), M.navy, { pos: [0, -0.012, 0] });
+    parts.add(new THREE.CylinderGeometry(0.078, 0.072, 0.13, 32), M.cup, { pos: [0, -0.082, 0] });
+    parts.add(new THREE.CylinderGeometry(0.03, 0.03, 0.012, 22), M.blueSoft, { pos: [side * 0.076, -0.082, 0], rot: facing(side, 0, 0) });
+    parts.add(new THREE.CylinderGeometry(0.011, 0.011, 0.016, 12), M.navy, { pos: [side * 0.078, -0.082, 0], rot: facing(side, 0, 0) });
+    parts.add(new THREE.CylinderGeometry(0.064, 0.064, 0.02, 28), M.navy, { pos: [0, -0.15, 0] });
+    parts.add(new THREE.CylinderGeometry(0.032, 0.032, 0.05, 16), M.navy, { pos: [0, -0.17, 0] });
+
+    // Hand: a knuckle disc on the back, four fingers curled under and a thumb above, so
+    // together they make a C that opens toward the body.
+    const hand = new THREE.Matrix4().compose(new THREE.Vector3(0, -0.226, 0), new THREE.Quaternion(), new THREE.Vector3(1.35, 1.35, 1.35));
+    parts.add(new RoundedBoxGeometry(0.1, 0.09, 0.092, 3, 0.034), M.armor, {}, hand);
+    parts.add(new THREE.CylinderGeometry(0.04, 0.04, 0.014, 24), M.silver, { pos: [side * 0.047, 0.002, 0.016], rot: facing(side, 0, 0.45) }, hand);
+    parts.add(new THREE.CylinderGeometry(0.015, 0.015, 0.018, 14), M.navy, { pos: [side * 0.05, 0.002, 0.017], rot: facing(side, 0, 0.45) }, hand);
+    const deg = Math.PI / 180;
+    const inward = -side;
+    // Each finger hangs straight down from the palm, then its tip curls in round this centre.
+    const curl = [inward * 0.028, -0.104];
+    const arc = (a) => [curl[0] + 0.028 * Math.cos(a * deg), curl[1] + 0.028 * Math.sin(a * deg)];
+    // the curl runs 180 -> 330 degrees on the left hand; the right hand is its mirror image
+    const [start, tip] = side < 0 ? [180, 330] : [210, 210];
+    for (const [z, drop] of [[-0.035, 0.008], [-0.0117, 0], [0.0117, 0], [0.035, 0.008]]) {
+      parts.add(geo.knuckle, M.armor, { pos: [0, -0.046 + drop, z] }, hand);
+      parts.add(geo.thumb, M.armor, { pos: [0, -0.075 + drop, z] }, hand);
+      parts.add(geo.hook, M.armor, { pos: [curl[0], curl[1] + drop, z], rot: [0, 0, start * deg] }, hand);
+      const [tx, ty] = arc(tip);
+      parts.add(geo.fingertip, M.armor, { pos: [tx, ty + drop, z] }, hand);
     }
-    parts.add(geo.finger, M.silver, { pos: [-side * 0.05, -0.03, 0.045], rot: [0.6, 0, -side * 0.6] }, hand);
+    // the thumb sticks out from the inner side, leaving the C open between it and the fingers
+    parts.add(geo.knuckle, M.armor, { pos: [inward * 0.048, -0.004, 0.02] }, hand);
+    parts.add(geo.thumb, M.armor, { pos: [inward * 0.068, -0.012, 0.02], rot: facing(inward, -0.35, 0) }, hand);
+    parts.add(geo.thumb, M.armor, { pos: [inward * 0.092, -0.035, 0.02], rot: facing(inward * 0.45, -1, 0) }, hand);
     parts.into(elbow, { shadow: true });
     return { side, shoulder, elbow, cur: { ...ARM_POSES.rest } };
   }
@@ -528,21 +919,29 @@ export class Robot {
   buildLeg(side) {
     const { M, geo } = this;
     const hip = new THREE.Object3D();
-    hip.position.set(side * 0.14, HIP_Y + 0.02, 0);
+    hip.position.set(side * 0.15, HIP_Y - 0.05, 0);
     this.bodyInner.add(hip);
     const leg = new THREE.Group();
     this.yawGroup.add(leg);
     const bellows = mesh(geo.legBellows, M.joint, leg, { shadow: true });
-    const ankle = mesh(new THREE.SphereGeometry(0.055, 20, 14), M.navy, this.yawGroup);
+    const knee = mesh(new THREE.SphereGeometry(0.052, 20, 14), M.navy, leg, { shadow: true });
 
+    // a chunky boot: cuffed shaft over the heel, rounded toe, steel sole, wheel at the heel
     const foot = new THREE.Group();
     this.yawGroup.add(foot);
-    mesh(new RoundedBoxGeometry(0.25, 0.12, 0.34, 4, 0.055), M.blue, foot, { pos: [0, -0.06, 0.04], shadow: true });
-    mesh(new RoundedBoxGeometry(0.27, 0.045, 0.37, 3, 0.02), M.steel, foot, { pos: [0, -0.11, 0.04] });
-    mesh(new RoundedBoxGeometry(0.2, 0.07, 0.1, 3, 0.03), M.blueSoft, foot, { pos: [0, -0.07, 0.19] });
-    mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.02, 24), M.silver, foot, { pos: [side * 0.13, -0.075, -0.04], rot: [0, 0, Math.PI / 2] });
-    mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.025, 12), M.navy, foot, { pos: [side * 0.135, -0.075, -0.04], rot: [0, 0, Math.PI / 2] });
-    return { side, hip, leg, bellows, ankle, foot };
+    const parts = new Batch();
+    parts.add(new RoundedBoxGeometry(0.205, 0.12, 0.21, 4, 0.045), M.blueDeep, { pos: [0, 0.03, -0.02] });
+    parts.add(new RoundedBoxGeometry(0.222, 0.03, 0.227, 3, 0.014), M.blueSoft, { pos: [0, 0.083, -0.02] });
+    parts.add(new THREE.CylinderGeometry(0.068, 0.068, 0.02, 24), M.navy, { pos: [0, 0.097, -0.02] });
+    parts.add(new RoundedBoxGeometry(0.3, 0.13, 0.44, 5, 0.06), M.armor, { pos: [0, -0.07, 0.065] });
+    parts.add(new RoundedBoxGeometry(0.26, 0.09, 0.2, 4, 0.04), M.armor, { pos: [0, -0.02, 0.085], rot: [0.5, 0, 0] }); // instep
+    parts.add(new THREE.SphereGeometry(1, 24, 16), M.blue, { pos: [0, -0.07, 0.19], scale: [0.14, 0.07, 0.125] }); // round toe
+    parts.add(new RoundedBoxGeometry(0.312, 0.045, 0.455, 3, 0.02), M.silver, { pos: [0, -0.113, 0.065] }); // midsole
+    parts.add(new RoundedBoxGeometry(0.32, 0.05, 0.47, 3, 0.022), M.slate, { pos: [0, -0.145, 0.065] });
+    parts.add(new THREE.CylinderGeometry(0.052, 0.052, 0.03, 24), M.silver, { pos: [side * 0.152, -0.085, -0.08], rot: [0, 0, Math.PI / 2] });
+    parts.add(new THREE.CylinderGeometry(0.022, 0.022, 0.036, 14), M.navy, { pos: [side * 0.153, -0.085, -0.08], rot: [0, 0, Math.PI / 2] });
+    parts.into(foot, { shadow: true });
+    return { side, hip, leg, bellows, knee, foot };
   }
 
   // ---------------------------------------------------------- control
@@ -655,7 +1054,7 @@ export class Robot {
     this.body.rotation.x = post.lean + o.lean + wa * 0.08 - this.sit * 0.05 + this.sleep * 0.08 + this.listen * 0.06;
     this.body.rotation.z = o.bodyRoll + wa * Math.sin(ph) * 0.045 + noise(t * 0.4, 3) * 0.018;
     const br = 1 + breathe * lerp(0.008, 0.02, this.sleep);
-    this.torso.scale.set(br, 1 + breathe * 0.012, 0.85 * br);
+    this.torso.scale.set(br, 1 + breathe * 0.012, TORSO_Z * br);
 
     // ---- head: turns toward what the eyes want, lagging behind them like a real neck
     const relYaw = Math.atan2(Math.sin(absYaw - yaw), Math.cos(absYaw - yaw));
@@ -752,17 +1151,20 @@ export class Robot {
       let top = clamp(ex.lidTop + squint * 0.3 + o.lidTop - this.listen * 0.12, 0, 1);
       top = Math.max(top, this.blinkAmt * (1 - bot), sleepClose * (1 - bot));
       if (top + bot > 1) top = 1 - bot;
-      // upper lid follows the gaze a little, like a real eyelid
-      eye.upper.rotation.x = -Math.PI / 2 + top * Math.PI - this.eyePitch * 0.35 * (1 - top);
-      eye.lower.rotation.x = Math.PI / 2 - bot * Math.PI;
-      eye.upperPivot.rotation.z = eye.side * ex.tilt * 0.45;
-      eye.lowerPivot.rotation.z = -eye.side * ex.tilt * 0.12;
-      eye.ball.rotation.set(-this.eyePitch, this.eyeYaw, 0, 'YXZ');
-      eye.socket.scale.setScalar(ex.eye * (1 + (eye.side < 0 ? ex.asym * 0.06 : 0) + this.listen * 0.05));
-      const irisScale = Math.max(0.001, 1 - ex.heart);
-      eye.iris.scale.set(irisScale, irisScale, 1);
-      const pupil = ex.pupil * irisScale;
-      eye.pupil.scale.set(pupil, pupil, 1);
+      const size = ex.eye * (1 + (eye.side < 0 ? ex.asym * 0.06 : 0) + this.listen * 0.05);
+      const irisK = Math.max(0.001, 1 - ex.heart);
+      const gx = this.eyeYaw / 0.6;
+      const gy = this.eyePitch / 0.5;
+      const g = Math.max(1, Math.hypot(gx, gy)) / (EYE.look * size);
+      this.shapeEye(eye, size, gx / g, gy / g, irisK, ex.pupil * irisK);
+      // lid lines: height and slope; the upper lid follows the gaze a little, like a real eyelid
+      const r = EYE.ry * size;
+      eye.lidMat.userData.cut.value.set(
+        lerp(1.15, -1.15, top) * r + this.eyePitch * 0.3 * r * (1 - top),
+        lerp(-1.15, 1.15, bot) * r,
+        Math.tan(eye.side * ex.tilt * 0.45),
+        Math.tan(-eye.side * ex.tilt * 0.12),
+      );
       eye.heart.visible = ex.heart > 0.02;
       eye.heart.scale.setScalar(ex.heart * (1 + 0.1 * Math.sin(this.t * 8)));
       eye.catchlights[0].scale.setScalar(1 + ex.sparkle * 0.6);
@@ -808,10 +1210,10 @@ export class Robot {
       this.yawGroup.worldToLocal(hip);
       const phs = ph + (s > 0 ? Math.PI : 0);
       const lift = Math.max(0, Math.sin(phs)) * 0.085 * wa;
-      ground.set(s * (0.18 + this.sit * 0.05), ANKLE_Y + lift, -0.1 * wa * Math.cos(phs) + this.sit * 0.2);
+      ground.set(s * (0.245 + this.sit * 0.03), ANKLE_Y + lift, -0.1 * wa * Math.cos(phs) + this.sit * 0.2);
       // held up: legs hang under the hips, trail the motion and kick a little
       const sw = this.legSwing.value;
-      hang.set(hip.x + s * 0.03 + Math.sin(sw) * 0.36, hip.y - Math.cos(sw) * 0.36, hip.z + 0.05 + Math.sin(this.t * 9 + s * 1.6) * 0.08 * this.dangle);
+      hang.set(hip.x + s * 0.06 + Math.sin(sw) * 0.27, hip.y - Math.cos(sw) * 0.27, hip.z + 0.05 + Math.sin(this.t * 9 + s * 1.6) * 0.07 * this.dangle);
       const ankle = ground.lerp(hang, this.dangle);
       dir.subVectors(ankle, hip);
       const len = Math.max(dir.length(), 0.05);
@@ -819,7 +1221,7 @@ export class Robot {
       leg.leg.position.copy(hip);
       leg.leg.quaternion.setFromUnitVectors(DOWN, dir);
       leg.bellows.scale.set(1, len, 1);
-      leg.ankle.position.copy(ankle);
+      leg.knee.position.y = -len * 0.48;
       leg.foot.position.copy(ankle);
       leg.foot.rotation.set(-Math.max(0, Math.sin(phs)) * 0.35 * wa + this.dangle * 0.5 - this.sit * 0.15, 0, 0);
     }

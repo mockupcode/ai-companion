@@ -467,7 +467,7 @@ async function main() {
   }
 
   // ---------------------------------------------------------------- input
-  const hitRobot = (x, y) => Math.abs(x - S.x) < 0.62 * ppu && y > S.y - ROBOT_H * ppu && y < S.y + 6;
+  const hitRobot = (x, y) => Math.abs(x - S.x) < 0.7 * ppu && y > S.y - ROBOT_H * ppu && y < S.y + 6;
 
   function setInteractive(on) {
     if (on === S.interactive) return;

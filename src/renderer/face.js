@@ -14,7 +14,7 @@ export const FACE_SLICE = {
 
 const FW = 1024;
 const FH = 512;
-const MOUTH_Y = 372;
+const MOUTH_Y = 400;
 const INK = '#13213a';
 
 const bezier = (a, b, c, u) => (1 - u) * (1 - u) * a + 2 * u * (1 - u) * b + u * u * c;
@@ -51,7 +51,7 @@ export class FaceDecal {
     const ctx = this.ctx;
     for (const side of [-1, 1]) {
       const x = 512 + side * 292;
-      const y = 318;
+      const y = 336;
       ctx.save();
       ctx.translate(x, y);
       ctx.scale(1.5, 0.8);
@@ -81,22 +81,25 @@ export class FaceDecal {
   drawMouth(f, t) {
     const ctx = this.ctx;
     const open = clamp(f.open, 0, 1);
-    const w = lerp(196, 92, f.round);
+    const w = lerp(226, 100, f.round);
     const x0 = 512 - w / 2;
-    const cornerY = MOUTH_Y - f.smile * 20;
-    const midY = MOUTH_Y + f.smile * 40;
+    const y0 = MOUTH_Y - open * 36; // an open mouth grows upward, clear of the jaw band
+    const cornerY = y0 - f.smile * 24;
+    const midY = y0 + f.smile * 48;
     const wob = (u) => f.wobble * 11 * Math.sin(u * Math.PI * 3 + t * 7);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.strokeStyle = INK;
 
     if (open < 0.04) {
-      ctx.lineWidth = 15;
+      // a flat-bottomed curve that turns up sharply at the corners, like the sheet's smile
+      const bowl = (u) => 1 - Math.abs(2 * u - 1) ** 2.4;
+      ctx.lineWidth = 11;
       ctx.beginPath();
-      for (let i = 0; i <= 28; i++) {
-        const u = i / 28;
+      for (let i = 0; i <= 32; i++) {
+        const u = i / 32;
         const x = x0 + w * u;
-        const y = bezier(cornerY, midY, cornerY, u) + wob(u);
+        const y = cornerY + (midY - cornerY) * 0.72 * bowl(u) + wob(u);
         if (i) ctx.lineTo(x, y);
         else ctx.moveTo(x, y);
       }
@@ -131,14 +134,20 @@ export class FaceDecal {
   }
 }
 
-// Little glowing display on the chest plate.
+// The chest display: pale glass like the character sheet, with cartoon icons on it.
 const SW = 256;
 const SH = 150;
+const canvas2d = () => {
+  const c = Object.assign(document.createElement('canvas'), { width: SW, height: SH });
+  return c.getContext('2d');
+};
 
 export class ChestScreen {
   constructor() {
-    this.canvas = Object.assign(document.createElement('canvas'), { width: SW, height: SH });
-    this.ctx = this.canvas.getContext('2d');
+    this.ctx = canvas2d();
+    this.canvas = this.ctx.canvas;
+    this.layer = canvas2d(); // the icon in colour
+    this.ink = canvas2d(); // the same icon in ink, stamped round it as an outline
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.last = -1;
@@ -148,19 +157,53 @@ export class ChestScreen {
     if (t - this.last < 1 / 15) return; // an LED panel can be choppy; saves texture uploads
     this.last = t;
     const ctx = this.ctx;
+    const bg = ctx.createLinearGradient(0, 0, SW * 0.5, SH);
+    bg.addColorStop(0, '#f6fcff');
+    bg.addColorStop(0.5, '#d9eaf8');
+    bg.addColorStop(1, '#a8c2de');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, SW, SH);
+
+    this.drawIcon(this.layer, mode, color, t, level);
+    if (mode !== 'pulse') {
+      const ink = this.ink;
+      ink.clearRect(0, 0, SW, SH);
+      ink.globalCompositeOperation = 'source-over';
+      ink.drawImage(this.layer.canvas, 0, 0);
+      ink.globalCompositeOperation = 'source-in';
+      ink.fillStyle = INK;
+      ink.fillRect(0, 0, SW, SH);
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * TAU;
+        ctx.drawImage(ink.canvas, Math.cos(a) * 3.5, Math.sin(a) * 3.5);
+      }
+    } else ctx.globalAlpha = 0.45; // idle: a faint heartbeat on a blank screen
+    ctx.drawImage(this.layer.canvas, 0, 0);
+    ctx.globalAlpha = 1;
+
+    // glass streak, a soft shade under the bezel, and the ink edge
+    const glare = ctx.createLinearGradient(SW * 0.25, 0, SW * 0.55, SH);
+    glare.addColorStop(0, 'rgba(255,255,255,0)');
+    glare.addColorStop(0.42, 'rgba(255,255,255,0.5)');
+    glare.addColorStop(0.5, 'rgba(255,255,255,0)');
+    ctx.fillStyle = glare;
+    ctx.fillRect(0, 0, SW, SH);
+    const shade = ctx.createLinearGradient(0, 0, 0, 18);
+    shade.addColorStop(0, 'rgba(40,70,110,0.35)');
+    shade.addColorStop(1, 'rgba(40,70,110,0)');
+    ctx.fillStyle = shade;
+    ctx.fillRect(0, 0, SW, 18);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.roundRect(3, 3, SW - 6, SH - 6, 26);
+    ctx.stroke();
+    this.texture.needsUpdate = true;
+  }
+
+  drawIcon(ctx, mode, color, t, level) {
     ctx.clearRect(0, 0, SW, SH);
     ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(4, 4, SW - 8, SH - 8, 26);
-    const bg = ctx.createLinearGradient(0, 0, 0, SH);
-    bg.addColorStop(0, '#16304d');
-    bg.addColorStop(1, '#0b1728');
-    ctx.fillStyle = bg;
-    ctx.fill();
-    ctx.clip();
-
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 16;
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
     ctx.lineWidth = 7;
@@ -273,17 +316,6 @@ export class ChestScreen {
       }
     }
     ctx.restore();
-
-    // glass reflection
-    const glare = ctx.createLinearGradient(0, 0, SW, SH);
-    glare.addColorStop(0, 'rgba(255,255,255,0.16)');
-    glare.addColorStop(0.45, 'rgba(255,255,255,0.03)');
-    glare.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = glare;
-    ctx.beginPath();
-    ctx.roundRect(4, 4, SW - 8, SH - 8, 26);
-    ctx.fill();
-    this.texture.needsUpdate = true;
   }
 }
 
