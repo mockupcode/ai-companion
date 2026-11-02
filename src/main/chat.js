@@ -1,15 +1,19 @@
 'use strict';
 // Conversation with the language model through Ollama's /api/chat, streamed token by
 // token to the renderer. The model is asked to prefix replies with emotion/gesture tags
-// that drive the robot's face and body.
+// that drive the robot's face and body, and can call tools (playing music).
 const { spawn } = require('child_process');
 const { config, readState, writeState } = require('./config');
+const music = require('./music');
 
 const EMOTION_TAGS = 'neutral happy excited love sad angry surprised thinking confused sleepy shy';
 const GESTURE_TAGS = 'wave nod shake jump dance shrug spin';
+const TOOLS = music.tools;
+const MAX_TOOL_ROUNDS = 3;
 
 let history = [];
 let inflight = null; // { id, controller }
+let toolsSupported = true; // until the model says otherwise
 
 function systemPrompt() {
   const now = new Date().toLocaleString('th-TH', { dateStyle: 'full', timeStyle: 'short' });
@@ -27,6 +31,9 @@ function systemPrompt() {
     `- You may add one gesture tag right after it, also in English, chosen from: ${list(GESTURE_TAGS)}.`,
     '- You may insert another emotion tag mid-reply where your feeling changes.',
     '- Never translate the tags and never invent new ones. Tags are invisible to the user; they drive your face and body.',
+    '- You can play music. Whenever the user asks for a song, call play_music, even if the same song was played before or seems to be on: it starts it from the top.',
+    '  A few words first are fine while it loads. After a song starts, say what is playing in one short sentence; if it failed, say so briefly.',
+    '  Call stop_music to stop it, set_music_volume to change how loud it is.',
     '',
     'Examples:',
     '[happy][wave] สวัสดีจ้า! วันนี้ให้ช่วยอะไรดี?',
@@ -35,6 +42,15 @@ function systemPrompt() {
     '',
     `Current local date and time: ${now}.`,
   ].join('\n');
+}
+
+// Where the music stands, sent just before the newest user message rather than in the
+// system prompt: songs end and the app restarts, so the "now playing" turns earlier in
+// the history go stale, and models trust those over a line at the top.
+function musicNote() {
+  const playing = music.nowPlaying();
+  const state = playing ? `"${playing.title}" is playing, at ${Math.round(music.volume() * 100)}% volume` : 'no song is playing';
+  return `Right now ${state}. This is current; earlier messages about music may be out of date.`;
 }
 
 // macOS keeps third-party apps (Node, Electron) off the LAN until the user allows them
@@ -113,55 +129,124 @@ function abort() {
   inflight?.controller.abort();
 }
 
-// Streams one reply. `send` delivers chat:chunk / chat:done / chat:error to the renderer.
+// Keep the last `historyLimit` messages, starting at a user message so a tool result is
+// never left without the call it answers.
+function trimHistory() {
+  let start = Math.max(0, history.length - config.historyLimit);
+  while (start < history.length - 1 && history[start].role !== 'user') start++;
+  history = history.slice(start);
+}
+
+// One request to the model. Text is passed to `onText` as it streams; resolves to the
+// tool calls it made, if any.
+async function streamRound(tools, signal, onText) {
+  const asked = history.findLastIndex((m) => m.role === 'user');
+  const body = JSON.stringify({
+    model: config.model,
+    stream: true,
+    think: false,
+    messages: [
+      { role: 'system', content: systemPrompt() },
+      ...history.slice(0, asked),
+      { role: 'system', content: musicNote() },
+      ...history.slice(asked),
+    ],
+    ...(tools && { tools: TOOLS.map(({ name, description, parameters }) => ({ type: 'function', function: { name, description, parameters } })) }),
+    options: { temperature: config.temperature },
+  });
+  const calls = [];
+  const decoder = new TextDecoder();
+  let buf = '';
+  for await (const chunk of ollamaStream('/api/chat', body, signal)) {
+    buf += decoder.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const msg = JSON.parse(line);
+      if (msg.error) throw new Error(msg.error);
+      if (msg.message?.content) onText(msg.message.content);
+      if (msg.message?.tool_calls) calls.push(...msg.message.tool_calls);
+    }
+  }
+  return calls;
+}
+
+// Tool failures go back to the model as text so it can tell the user in its own words.
+async function runTool(call, signal) {
+  const tool = TOOLS.find((t) => t.name === call.function?.name);
+  if (!tool) return `Error: there is no tool called "${call.function?.name}".`;
+  try {
+    return await tool.run(call.function.arguments ?? {}, signal);
+  } catch (err) {
+    if (signal.aborted) throw err;
+    return `Error: ${err.message}`;
+  }
+}
+
+// Streams one reply, running any tools the model calls in between. `send` delivers
+// chat:chunk / chat:tool / chat:done / chat:error to the renderer.
 async function streamChat(id, text, send) {
   inflight?.controller.abort();
   const controller = new AbortController();
+  const { signal } = controller;
   inflight = { id, controller };
 
   history.push({ role: 'user', content: text });
-  history = history.slice(-config.historyLimit);
-  let reply = '';
+  trimHistory();
+  let partial = ''; // text of the round being streamed, until it's in the history
+  let said = false;
   // Give up if the model produces nothing for a minute.
-  let idle = setTimeout(() => controller.abort(new Error('ไม่มีคำตอบภายใน 60 วินาที')), 60000);
+  let idle;
+  const expect = (why) => {
+    clearTimeout(idle);
+    idle = setTimeout(() => controller.abort(new Error(why)), 60000);
+  };
+  const onText = (piece) => {
+    // keep the words of one round apart from the next
+    if (!partial && said && !/^\s/.test(piece)) send('chat:chunk', { id, content: ' ' });
+    expect('การตอบหยุดค้าง');
+    partial += piece;
+    said = true;
+    send('chat:chunk', { id, content: piece });
+  };
 
   try {
-    const body = JSON.stringify({
-      model: config.model,
-      stream: true,
-      think: false,
-      messages: [{ role: 'system', content: systemPrompt() }, ...history],
-      options: { temperature: config.temperature },
-    });
-    const decoder = new TextDecoder();
-    let buf = '';
-    for await (const chunk of ollamaStream('/api/chat', body, controller.signal)) {
-      buf += decoder.decode(chunk, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        const msg = JSON.parse(line);
-        if (msg.error) throw new Error(msg.error);
-        const piece = msg.message?.content;
-        if (piece) {
-          clearTimeout(idle);
-          idle = setTimeout(() => controller.abort(new Error('การตอบหยุดค้าง')), 60000);
-          reply += piece;
-          send('chat:chunk', { id, content: piece });
-        }
+    for (let round = 0; ; round++) {
+      expect('ไม่มีคำตอบภายใน 60 วินาที');
+      const tools = toolsSupported && round < MAX_TOOL_ROUNDS;
+      let calls;
+      try {
+        calls = await streamRound(tools, signal, onText);
+      } catch (err) {
+        if (!tools || !/does not support tools/i.test(err.message)) throw err;
+        console.warn(`${config.model} can't call tools, so it can't play music`);
+        toolsSupported = false;
+        calls = await streamRound(false, signal, onText);
       }
+      clearTimeout(idle);
+      if (!calls.length) {
+        history.push({ role: 'assistant', content: partial });
+        break;
+      }
+      send('chat:tool', { id });
+      const results = [];
+      for (const call of calls) {
+        const content = await runTool(call, signal);
+        results.push({ role: 'tool', content, tool_name: call.function?.name, ...(call.id && { tool_call_id: call.id }) });
+      }
+      history.push({ role: 'assistant', content: partial, tool_calls: calls }, ...results);
+      partial = '';
     }
-    history.push({ role: 'assistant', content: reply });
     writeState('history.json', history);
     send('chat:done', { id });
   } catch (err) {
-    if (reply) history.push({ role: 'assistant', content: reply });
+    if (partial) history.push({ role: 'assistant', content: partial });
     else if (history.at(-1)?.role === 'user') history.pop();
     // A newer message superseded this one; the renderer has already moved on.
     if (inflight?.id !== id) return;
-    send('chat:error', { id, message: explain(err, controller.signal) });
+    send('chat:error', { id, message: explain(err, signal) });
   } finally {
     clearTimeout(idle);
     if (inflight?.id === id) inflight = null;

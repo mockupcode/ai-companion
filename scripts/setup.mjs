@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // One-time setup for Blu: Node packages, config.json (which Ollama server and model to
 // use), the Python environment for the voice and listening models (downloaded from
-// Hugging Face), and the double-Ctrl keyboard helper. Safe to run again.
+// Hugging Face), yt-dlp for music, and the double-Ctrl keyboard helper. Safe to run
+// again (it also updates yt-dlp).
 //
 //   npm run setup                  interactive
 //   npm run setup -- --yes         no questions; keeps or creates config.json as is
@@ -11,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import ytdlp from '../src/main/ytdlp.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const flags = new Set(process.argv.slice(2));
@@ -99,6 +101,18 @@ function setupSpeech() {
   return true;
 }
 
+// yt-dlp goes into build/yt-dlp, not onto the system; Blu fetches it itself on first use
+// too, so this only saves the wait.
+async function setupMusic() {
+  step('Music (yt-dlp, kept in build/yt-dlp)');
+  if (process.platform !== 'darwin') return warn('skipped: the bundled yt-dlp is for macOS');
+  try {
+    ok((await ytdlp.install(ROOT)) ? 'yt-dlp downloaded' : 'yt-dlp is up to date');
+  } catch (err) {
+    warn(`couldn't get yt-dlp (${err.message}); Blu will try again the first time you ask for a song`);
+  }
+}
+
 function build() {
   step('Building');
   run('npm', ['run', 'build']);
@@ -118,6 +132,7 @@ async function main() {
 
   await configure();
   const speech = withSpeech && setupSpeech();
+  await setupMusic();
   build();
 
   console.log(`\n✓ Ready. Start Blu with:  npm start`);

@@ -107,14 +107,14 @@ body {
   display: flex;
 }
 
-/* "waking up…" while the speech models load, so a slow first reply doesn't look stuck */
+/* "waking up…" while the speech models load, or "finding the song…", so a slow reply doesn't look stuck */
 #bubble-wrap .status {
   display: none;
   font-size: 12.5px;
   color: var(--muted);
 }
 
-#bubble-wrap.waiting .status:not(:empty) {
+#bubble-wrap .status:not(:empty) {
   display: block;
 }
 

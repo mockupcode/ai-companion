@@ -5,6 +5,7 @@ import { Particles } from './fx.js';
 import { ChatUI } from './chatui.js';
 import { Sound, Voice } from './sound.js';
 import { Listener } from './listen.js';
+import { Music } from './music.js';
 import { clamp, damp, rand, pick } from './springs.js';
 
 // The window covers the whole work area; the WebGL canvas is only as big as the robot
@@ -88,10 +89,12 @@ async function main() {
   const fx = new Particles(scene);
   const sound = new Sound();
   const voice = new Voice(api, sound);
+  const music = new Music(api);
   const applySettings = (s) => {
     sound.enabled = s.sounds;
     voice.enabled = s.voice && Boolean(api.tts);
     voice.setVolume(s.voiceVolume ?? 1);
+    music.setVolume(s.musicVolume ?? 1);
   };
   applySettings(cfg.settings ?? { voice: false, sounds: true });
   api.on('settings', applySettings);
@@ -134,6 +137,7 @@ async function main() {
     emitT: 0,
     startledAt: 0,
     listen: 'off', // 'off' | 'listening' | 'transcribing'
+    grooveIn: 0,
   };
   S.prev = { x: S.x, y: S.y };
 
@@ -219,6 +223,14 @@ async function main() {
     if ((S.mode === 'idle' || S.mode === 'walk') && S.jumpCharge <= 0) S.jumpCharge = 0.14;
   }
 
+  // A song is on: dance to it, mostly, and don't doze off.
+  function groove(dt) {
+    touch();
+    if (robot.gesture || (S.grooveIn -= dt) > 0) return;
+    S.grooveIn = rand(0.1, 0.8);
+    doGesture(Math.random() < 0.75 ? 'dance' : pick(['spin', 'jump', 'nod']));
+  }
+
   function sleep() {
     setMode('sleep');
     sound.play('sleep');
@@ -278,6 +290,8 @@ async function main() {
     const now = performance.now();
     const idleFor = (now - S.lastInteraction) / 1000;
     const busy = chat.isOpen || chat.busy;
+    // dance between replies, even with the chat box open, but not while you're typing
+    const dancing = music.playing && !chat.busy && now - chat.typedAt > 3000;
     const sleepAfter = isNight() ? 60 : SLEEP_AFTER;
     S.modeT += dt;
 
@@ -285,6 +299,10 @@ async function main() {
       case 'idle':
         S.facing = 0;
         S.vx = damp(S.vx, 0, 8, dt);
+        if (dancing) {
+          groove(dt);
+          break;
+        }
         if (busy) break;
         if (idleFor > sleepAfter) {
           sleep();
@@ -308,7 +326,7 @@ async function main() {
       case 'sit':
         S.facing = 0;
         S.vx = 0;
-        if (busy || S.modeT > S.sitFor) setMode('idle');
+        if (busy || dancing || S.modeT > S.sitFor) setMode('idle');
         if (idleFor > sleepAfter) sleep();
         break;
       case 'sleep':
@@ -403,10 +421,11 @@ async function main() {
     speechSince = performance.now();
   });
 
-  function wakeStatus(now) {
-    const secs = Math.round((now - speechSince) / 1000);
-    if (speechState === 'loading' && voice.enabled && chat.busy) return `กำลังตื่น… โหลดเสียงพูด ${secs} วิ`;
-    if (speechState !== 'ready' && S.listen === 'transcribing') return `กำลังตื่น… โหลดระบบฟัง ${secs} วิ`;
+  function statusLine(now) {
+    const secs = (since) => Math.round((now - since) / 1000);
+    if (speechState === 'loading' && voice.enabled && chat.busy) return `กำลังตื่น… โหลดเสียงพูด ${secs(speechSince)} วิ`;
+    if (speechState !== 'ready' && S.listen === 'transcribing') return `กำลังตื่น… โหลดระบบฟัง ${secs(speechSince)} วิ`;
+    if (music.status) return `${music.status} ${secs(music.statusSince)} วิ`;
     return '';
   }
 
@@ -450,7 +469,7 @@ async function main() {
     }
     let spec = EMITS[emotion];
     if (S.mode === 'sleep') spec = ['z', 1.2, 'top'];
-    if (S.danceT > 0) spec = ['note', 0.35, 'top'];
+    if (S.danceT > 0 || music.playing) spec = ['note', 0.35, 'top'];
     if (!spec || (S.emitT -= dt) > 0) return;
     const [kind, every, where] = spec;
     S.emitT = every * rand(0.8, 1.2);
@@ -664,8 +683,9 @@ async function main() {
 
     const emotion = currentEmotion(now);
     robot.setEmotion(emotion);
-    chat.setStatus(wakeStatus(now));
+    chat.setStatus(statusLine(now));
     chat.update(dt, now);
+    music.update(dt, S.listen === 'listening' ? 'listen' : chat.talking ? 'talk' : null, chat.busy || S.listen !== 'off');
 
     robot.update(dt, {
       speed: isGround() ? S.vx / ppu : 0,
@@ -697,7 +717,7 @@ async function main() {
   }
   requestAnimationFrame(frame);
 
-  if (!window.blu || location.search.includes('debug')) enableDevKeys({ robot, S, setMood, doGesture, chat, setMode, renderer, scene, voice });
+  if (!window.blu || location.search.includes('debug')) enableDevKeys({ robot, S, setMood, doGesture, chat, setMode, renderer, scene, voice, music });
 }
 
 function blobTexture() {
@@ -722,6 +742,7 @@ function previewApi() {
     focus() {},
     showMenu() {},
     abort() {},
+    musicEnded() {},
     chat(id) {
       const reply = '[happy][wave] สวัสดี! นี่คือโหมดพรีวิว ยังไม่ได้ต่อ Ollama [thinking] ลองรันผ่าน Electron ด้วย npm start ดูนะ';
       let i = 0;

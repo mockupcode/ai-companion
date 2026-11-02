@@ -70,6 +70,10 @@ export class ChatUI {
     api.on('chat:chunk', ({ id, content }) => {
       if (id === this.id) this.parser.push(content);
     });
+    // speak what came before a tool call (e.g. "sure, one sec") while the tool runs
+    api.on('chat:tool', ({ id }) => {
+      if (id === this.id) this.flush();
+    });
     api.on('chat:done', ({ id }) => {
       if (id !== this.id) return;
       this.parser.end();

@@ -8,10 +8,11 @@ const { config, readState, writeState } = require('./config');
 const chat = require('./chat');
 const speech = require('./speech');
 const keytap = require('./keytap');
+const music = require('./music');
 
 let win = null;
 let tray = null;
-let settings = { voice: true, sounds: true, voiceVolume: 1 }; // menu toggles, remembered
+let settings = { voice: true, sounds: true, voiceVolume: 1, musicVolume: 1 }; // menu toggles, remembered
 
 function send(channel, data) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, data);
@@ -75,7 +76,13 @@ function startCursorFeed() {
   }, 33);
 }
 
+const volumeMenu = (label, key, levels) => ({
+  label,
+  submenu: levels.map(([name, v]) => ({ label: name, type: 'radio', checked: settings[key] === v, click: () => setSetting(key, v) })),
+});
+
 function buildMenu() {
+  const song = music.nowPlaying();
   return Menu.buildFromTemplate([
     { label: `คุยกับ ${config.name}`, accelerator: config.shortcut, click: () => send('command', 'chat') },
     {
@@ -87,17 +94,15 @@ function buildMenu() {
     { label: 'เต้นหน่อย', click: () => send('command', 'dance') },
     { label: 'นอน / ตื่น', click: () => send('command', 'sleep') },
     { label: 'มากลางจอหน่อย', click: () => send('command', 'come') },
+    {
+      label: song ? `หยุดเพลง: ${song.title.length > 40 ? `${song.title.slice(0, 40)}…` : song.title}` : 'หยุดเพลง',
+      enabled: Boolean(song),
+      click: () => music.stop(),
+    },
     { type: 'separator' },
     { label: 'พูดออกเสียง', type: 'checkbox', checked: settings.voice, click: (item) => setSetting('voice', item.checked) },
-    {
-      label: 'ความดังเสียงพูด',
-      submenu: [
-        ['เบา', 0.6],
-        ['ปกติ', 1],
-        ['ดัง', 1.5],
-        ['ดังที่สุด', 1.8],
-      ].map(([label, v]) => ({ label, type: 'radio', checked: settings.voiceVolume === v, click: () => setSetting('voiceVolume', v) })),
-    },
+    volumeMenu('ความดังเสียงพูด', 'voiceVolume', [['เบา', 0.6], ['ปกติ', 1], ['ดัง', 1.5], ['ดังที่สุด', 1.8]]),
+    volumeMenu('ความดังเพลง', 'musicVolume', [['เบา', 0.5], ['ปกติ', 1], ['ดัง', 1.5], ['ดังที่สุด', 2]]),
     { label: 'เสียงเอฟเฟกต์', type: 'checkbox', checked: settings.sounds, click: (item) => setSetting('sounds', item.checked) },
     {
       label: 'ล้างความจำการคุย',
@@ -137,6 +142,7 @@ function registerIpc() {
   ipcMain.on('context-menu', () => buildMenu().popup({ window: win }));
   ipcMain.on('chat:send', (_e, { id, text }) => chat.streamChat(id, text, send));
   ipcMain.on('chat:abort', () => chat.abort());
+  ipcMain.on('music:ended', () => music.ended());
 }
 
 function createTray() {
@@ -164,6 +170,11 @@ if (!app.requestSingleInstanceLock()) {
     settings = { ...settings, ...readState('settings.json', {}) };
     chat.loadHistory();
     speech.init(send);
+    music.init(send, {
+      changed: () => tray?.setContextMenu(buildMenu()),
+      volume: () => settings.musicVolume,
+      setVolume: (v) => setSetting('musicVolume', v),
+    });
     registerIpc();
     createWindow();
     createTray();
@@ -177,6 +188,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
+    chat.abort(); // stops a song download too
     speech.stop();
     keytap.stop();
   });

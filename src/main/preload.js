@@ -1,7 +1,7 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
-const CHANNELS = ['cursor', 'command', 'settings', 'speech-state', 'window-blur', 'chat:chunk', 'chat:done', 'chat:error'];
+const CHANNELS = ['cursor', 'command', 'settings', 'speech-state', 'window-blur', 'music', 'chat:chunk', 'chat:tool', 'chat:done', 'chat:error'];
 
 contextBridge.exposeInMainWorld('blu', {
   getConfig: () => ipcRenderer.invoke('get-config'),
@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('blu', {
   tts: (text) => ipcRenderer.invoke('tts', text),
   transcribe: (wav) => ipcRenderer.invoke('asr', wav),
   micAccess: () => ipcRenderer.invoke('mic-access'),
+  musicEnded: () => ipcRenderer.send('music:ended'),
   on: (channel, fn) => {
     if (CHANNELS.includes(channel)) ipcRenderer.on(channel, (_e, data) => fn(data));
   },

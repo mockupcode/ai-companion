@@ -26,6 +26,9 @@ Blu เป็นหุ่นยนต์ 3D (Three.js) ที่อยู่ข�
 - **มีอารมณ์** โมเดลใส่แท็กอารมณ์ไว้ในคำตอบ หุ่นจะเปลี่ยนสีหน้า ท่าทาง สีไฟเสาอากาศ จอที่หน้าอก
   และเอฟเฟกต์ (หัวใจ น้ำตา ไอโกรธ Zzz) ตามไปด้วย และเปลี่ยนอารมณ์กลางประโยคได้
 - **เล่นด้วยได้** ลากหุ่นแล้วโยน (โยนแรงๆ จะมึน) เอาเมาส์ลูบไปมาให้ดีใจ จิ้มรัวๆ จะโกรธ
+- **เปิดเพลง** บอกชื่อเพลง (พิมพ์หรือพูดก็ได้) หุ่นจะหาใน YouTube ด้วย [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+  โหลดมาเปิด แล้วเต้นตามจนจบ บอกให้ดังขึ้นหรือเบาลงได้ และเพลงจะหรี่ลงเองตอนหุ่นพูดหรือฟัง
+  (โมเดลต้องรองรับ tool calling)
 
 <p align="center"><img src="docs/emotions.png" alt="อารมณ์ต่างๆ" width="680"></p>
 <p align="center"><sub>ดีใจ · ตื่นเต้น · รัก · เขิน · ตกใจ · คิด · เศร้า · โกรธ · งง · ง่วง/หลับ</sub></p>
@@ -55,7 +58,7 @@ npm run setup
 
 ตัวติดตั้งจะถามแค่ **ที่อยู่ของ Ollama** (เช่น `http://localhost:11434` หรือ `http://192.168.1.20:11434`)
 และ **โมเดลที่จะใช้** (ดึงรายชื่อจาก Ollama มาให้เลือก) แล้วจะติดตั้ง package ทั้งหมด
-โหลดโมเดลเสียงจาก Hugging Face ทดสอบพูด-ฟังให้ และ build ทุกอย่างเอง ไม่ต้องตั้งค่าอื่น
+โหลดโมเดลเสียงจาก Hugging Face ทดสอบพูด-ฟังให้ โหลด yt-dlp มาไว้ใน `build/` และ build ทุกอย่างเอง ไม่ต้องตั้งค่าอื่น
 
 ```bash
 npm start
@@ -75,7 +78,8 @@ npm start
 | `Cmd+Shift+Space` / `Cmd+Shift+M` | เปิดช่องคุย / พูด จากที่ไหนก็ได้ |
 | ลากแล้วปล่อย | หุ่นห้อยตามเมาส์ ปล่อยแรงๆ คือโยน |
 | เอาเมาส์ลูบไปมาบนหุ่น | ดีใจจนตาเป็นรูปหัวใจ |
-| คลิกขวา | เมนู: คุย พูด เต้น นอน/ตื่น ความดังเสียง ล้างความจำ ออก |
+| บอกว่า "เปิดเพลง ลาลาลอย หน่อย" | หาเพลงใน YouTube แล้วเปิด "ดังขึ้นอีก" / "หยุดเพลง" ก็ได้ |
+| คลิกขวา | เมนู: คุย พูด เต้น นอน/ตื่น หยุดเพลง ความดังเสียงพูด/เพลง ล้างความจำ ออก |
 
 ### ตั้งค่า (`config.json`)
 
@@ -126,6 +130,10 @@ npm start
   `.venv/bin/python speech/server.py --selftest`
 - **ใช้ RAM เยอะ** โมเดลเสียงใช้ประมาณ 1.5–2 GB ขณะโหลดอยู่ และจะคืนเองเมื่อไม่ได้ใช้ (`speechIdleMinutes`)
   หรือตั้ง `"asr": false` / `"ttsEngine": "say"`
+- **เปิดเพลงไม่ได้** โมเดลต้องรองรับ tool calling (ถ้าไม่รองรับ log จะขึ้นว่า `can't call tools`)
+  yt-dlp อยู่ใน `build/yt-dlp` ถ้ายังไม่มี หุ่นจะโหลดมาเองตอนขอเพลงครั้งแรก (ประมาณ 20 วินาที)
+  และอัปเดตเองเมื่อโหลดเพลงไม่ผ่าน หรือรัน `npm run setup` เพื่ออัปเดตก็ได้
+  เพลงที่โหลดแล้วเก็บไว้ 40 เพลงล่าสุดใน `~/Library/Application Support/Blu/music`
 
 ### โมเดลและไลเซนส์
 
@@ -135,16 +143,20 @@ npm start
 | --- | --- |
 | [Wayu-Paxa-TTS-Edge](https://huggingface.co/wayu-ai/wayu-paxa-tts-edge) (เสียงพูด) | CC-BY-NC-4.0: **ห้ามใช้เชิงพาณิชย์** และอยู่ภายใต้ [Acceptable Use ของ Wayu Research](https://www.wayuresearch.org/terms#acceptable-use) |
 | [Typhoon ASR Realtime](https://huggingface.co/typhoon-ai/typhoon-asr-realtime) (การฟัง) | CC-BY-4.0 และ [เงื่อนไขของ OpenTyphoon](https://opentyphoon.ai/tac) |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) (เปิดเพลง) | Unlicense |
 | Three.js, Electron | MIT |
 
 โมเดลไม่ได้อยู่ใน repo นี้ ตัวติดตั้งจะโหลดจาก Hugging Face ให้ และเสียงที่สร้างขึ้นเป็นเสียงสังเคราะห์
+เพลงที่หุ่นโหลดจาก YouTube เป็นลิขสิทธิ์ของเจ้าของเพลง ใช้ฟังส่วนตัวเท่านั้น
 
 ### โครงสร้างโปรเจกต์
 
 ```text
 src/main/         Electron main process
   index.js          หน้าต่างโปร่งใสคลุมจอ, เมนู, IPC
-  chat.js           คุยกับ Ollama แบบ streaming (+ system prompt ที่สั่งให้ใส่แท็กอารมณ์)
+  chat.js           คุยกับ Ollama แบบ streaming (+ system prompt ที่สั่งให้ใส่แท็กอารมณ์, เรียก tool)
+  music.js          tool เปิด/หยุด/ปรับเสียงเพลง: หาและโหลดเพลงด้วย yt-dlp, cache
+  ytdlp.js          โหลด/อัปเดต yt-dlp ไว้ใน build/yt-dlp
   speech.js         จัดการ speech server, เสียงสำรอง `say`, คืน RAM เมื่อว่าง
   keytap.js         รับสัญญาณ Ctrl 2 ครั้งจาก helper
   config.js         ค่าตั้งและข้อมูลผู้ใช้
@@ -153,6 +165,7 @@ src/renderer/     หน้าจอ (bundle ด้วย esbuild)
   app.js            ฉาก, พฤติกรรม, ฟิสิกส์ลาก/โยน, อินพุต
   chatui.js         บับเบิล, ช่องพิมพ์, จังหวะข้อความให้ตรงกับเสียง
   sound.js          เสียงเอฟเฟกต์, เล่นเสียงพูด + ปรับความดัง + lip sync
+  music.js          เล่นเพลง (ข้ามช่วงเงียบตอนต้น), หรี่เพลงตอนหุ่นพูด/ฟัง
   listen.js         อัดเสียงไมค์ + ตรวจจับว่าพูดจบ
   face.js, fx.js    ปาก/จอหน้าอก (canvas texture), particle
   tags.js           แยกแท็กอารมณ์ออกจากข้อความที่ stream มา
@@ -184,6 +197,9 @@ are Thai; the model replies in whatever language you write in.
 - **Emotions:** the model tags its replies with emotions and gestures; the face, pose, antenna light, chest screen
   and effects (hearts, tears, steam, Zzz) follow, even changing mid-sentence.
 - **Play with it:** drag and throw it (too hard and it gets dizzy), rub it with the cursor, or poke it too often.
+- **Music:** name a song (typed or spoken) and it finds it on YouTube with [yt-dlp](https://github.com/yt-dlp/yt-dlp),
+  plays it and dances along. Ask for it louder or quieter; it dips by itself while Blu talks or listens. Needs a
+  model that supports tool calling.
 
 <p align="center"><img src="docs/emotions.png" alt="Emotions" width="680"></p>
 
@@ -212,7 +228,7 @@ npm run setup
 
 Setup only asks for **your Ollama address** (e.g. `http://localhost:11434` or `http://192.168.1.20:11434`) and
 **which model** to use (it lists what that Ollama has). It then installs everything, downloads the speech models
-from Hugging Face, tests speaking and listening, and builds the app.
+from Hugging Face, tests speaking and listening, puts yt-dlp in `build/`, and builds the app.
 
 ```bash
 npm start
@@ -233,7 +249,8 @@ right-click the robot.
 | `Cmd+Shift+Space` / `Cmd+Shift+M` | Open the chat box / talk, from anywhere |
 | Drag and release | Carry it around; let go while moving to throw it |
 | Rub the cursor over it | It gets happy, then heart-eyed |
-| Right-click | Menu: chat, talk, dance, sleep/wake, voice volume, forget the conversation, quit |
+| Say "play Bohemian Rhapsody" | It finds the song on YouTube and plays it; "louder" / "stop the music" work too |
+| Right-click | Menu: chat, talk, dance, sleep/wake, stop the music, voice/music volume, forget the conversation, quit |
 
 ### Configuration (`config.json`)
 
@@ -285,6 +302,10 @@ Usually only these two, which `npm run setup` asks for:
   `.venv/bin/python speech/server.py --selftest`.
 - **Memory:** the speech models take about 1.5–2 GB while loaded and are released when idle (`speechIdleMinutes`),
   or turn them off with `"asr": false` / `"ttsEngine": "say"`.
+- **Music doesn't play:** the model has to support tool calling (if it doesn't, the log says `can't call tools`).
+  yt-dlp lives in `build/yt-dlp`; if it's missing, Blu downloads it the first time you ask for a song (about 20 s),
+  and updates it when a download fails. `npm run setup` updates it too. The last 40 songs are cached in
+  `~/Library/Application Support/Blu/music`.
 
 ### Models and licenses
 
@@ -294,16 +315,20 @@ The code in this repository is licensed under [Apache-2.0](LICENSE). The models 
 | --- | --- |
 | [Wayu-Paxa-TTS-Edge](https://huggingface.co/wayu-ai/wayu-paxa-tts-edge) (voice) | CC-BY-NC-4.0: **no commercial use**, plus the [Wayu Research acceptable use terms](https://www.wayuresearch.org/terms#acceptable-use) |
 | [Typhoon ASR Realtime](https://huggingface.co/typhoon-ai/typhoon-asr-realtime) (listening) | CC-BY-4.0 and the [OpenTyphoon terms](https://opentyphoon.ai/tac) |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) (music) | Unlicense |
 | Three.js, Electron | MIT |
 
 The models are not part of this repository; setup downloads them from Hugging Face. The voice is synthetic.
+Songs Blu downloads from YouTube belong to their owners; they're for your own listening.
 
 ### Project layout
 
 ```text
 src/main/         Electron main process
   index.js          the transparent full-screen window, menu, IPC
-  chat.js           streaming chat with Ollama (+ the system prompt asking for emotion tags)
+  chat.js           streaming chat with Ollama (+ the system prompt asking for emotion tags, tool calls)
+  music.js          play / stop / volume tools: find and download songs with yt-dlp, cache
+  ytdlp.js          installs/updates yt-dlp in build/yt-dlp
   speech.js         speech server lifecycle, `say` fallback, idle unloading
   keytap.js         double-Ctrl events from the helper
   config.js         settings and per-user state
@@ -312,6 +337,7 @@ src/renderer/     what you see (bundled with esbuild)
   app.js            scene, behaviour, drag/throw physics, input
   chatui.js         speech bubble, input box, keeping text in step with the voice
   sound.js          sound effects, voice playback + loudness + lip sync
+  music.js          song playback (skipping silent intros), ducking under Blu's voice and the mic
   listen.js         microphone recording + end-of-speech detection
   face.js, fx.js    mouth/chest screen (canvas textures), particles
   tags.js           pulls emotion tags out of the streamed reply
